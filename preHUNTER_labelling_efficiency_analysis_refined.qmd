@@ -1,0 +1,522 @@
+---
+title: "Labelling efficiency - pre-HUNTER | NV012 MIP N-terminome human"
+author: "Miguel Cosenza-Contreras"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show the code"
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    embed-resources: true
+editor: 
+  source: true
+execute:
+  eval: true
+  echo: true
+  error: false
+  warning: false
+  message: false
+---
+
+This workflow is intended to process the `psm.tsv` file after a FragPipe search of a preHUNTER experiment and run counts on N-term and K modifications.
+
+# Required R packages
+
+__TermineR installation and/or loading__
+
+```{r}
+if (!require("TermineR", quietly = TRUE)){        
+    devtools::install_github("MiguelCos/TermineR")
+}
+```
+
+__Required R packages__
+
+```{r load_packages, warning=FALSE, message=FALSE}
+## Required packages ----
+library(TermineR)
+library(tidyverse)
+library(janitor)
+library(here)
+```
+
+# Define interesting variables
+
+```{r}
+# define arguments
+
+## data analysis path (path to psm.tsv file)
+analysis_path <- here("fp_searches/fp_prehunter_dia/")
+
+
+## mass of the expected modification (for dimethyl...)
+modif_mass <- "34.063[0-9]"
+
+nterm_modif <- "N-term\\(34.063[0-9]\\)"
+
+kmodif <- "K\\(34.063[0-9]\\)"
+
+## protease specificity  
+specificity <- "K|R"
+```
+
+# Prep data 
+
+## Load and characterize PSMs by labelling features
+
+```{r}
+# check if there is a 'psm.tsv' file within the analysis_path
+if (!file.exists(paste0(analysis_path, "/psm.tsv"))){
+  message("No 'psm.tsv' file found in the analysis path.\nLooking for psm.tsv files in subfolders and merging")
+  
+  # get list of subfolders for analysis_path
+  subfolders <- list.dirs(analysis_path, full.names = FALSE, recursive = FALSE)
+  
+  # check if there are subfolders
+  if (length(subfolders) == 0){
+    stop("No subfolders found in the analysis path")
+  }
+
+  # construct path to psms
+  psms_paths <- paste0(analysis_path,"/", subfolders, "/psm.tsv")
+
+  # load psms into a list with purrr::map
+  psms <- purrr::map(
+  .x = psms_paths,
+  .f = read_tsv
+  ) %>%
+    bind_rows()
+} else {
+  
+  # load the psm.tsv file
+  psms <- read_tsv(paste0(analysis_path, "/psm.tsv"))
+  
+}
+```
+
+```{r}
+psms <- psms %>%
+  clean_names() %>%
+  # keep only interesting columns 
+  dplyr::select(spectrum, peptide, modified_peptide,
+                protein,
+                prev_aa, next_aa,
+                peptide_length,
+                protein_start,
+                protein_end,
+                number_of_missed_cleavages,
+                number_of_enzymatic_termini,
+                assigned_modifications,
+                intensity) %>%
+  # exclude psms with modified Ks in position 1 or 2 of the peptide
+  filter(!str_detect(assigned_modifications, 
+                     "K1|K2"),
+         !str_detect(assigned_modifications,
+                    "42.010[0-1]")) %>%
+  # last aa
+  mutate(last_aa = str_sub(peptide,
+                           start = -1,
+                           end = -1),
+         # substitu NAs in the assigned_modifications column
+         assigned_modifications = if_else(condition = is.na(assigned_modifications),
+                                          true = "None",
+                                          false = assigned_modifications),
+         modified_peptide = if_else(condition = is.na(modified_peptide),
+                                          true = "None",
+                                          false = modified_peptide)) %>%
+        # label PSMs
+  mutate(nterm_labelled = str_detect(assigned_modifications,
+                                     nterm_modif),
+         k_labelled = str_detect(assigned_modifications,
+                                 kmodif),
+         nr_taggable_sites = str_count(peptide, "K") + 1,
+         nr_taggable_Ks = str_count(peptide, "K"),
+         nr_tagged_sites = str_count(assigned_modifications, 
+                                     paste0(modif_mass)),
+         nr_tagged_Ks = str_count(assigned_modifications, 
+                                 paste0("K\\(",modif_mass,"\\)")),
+         k_cterm_labelled = if_else(str_detect(modified_peptide,
+                                       "K\\[[0-9][0-9][0-9]\\]$"),
+                                    TRUE, FALSE),
+         canonical_nterm = if_else(protein_start == 1,
+                                   true = "Protein-N-term",
+                                   false = "Peptide-N-term"),
+         semi_type = case_when(str_detect(last_aa, specificity) & str_detect(prev_aa, specificity, negate = TRUE) ~ "semi_Nterm",
+                                     str_detect(last_aa, specificity, negate = TRUE) & str_detect(prev_aa, specificity) ~ "semi_Cterm",
+                                     str_detect(last_aa, specificity, negate = TRUE) & str_detect(prev_aa, specificity, negate = TRUE) ~ "unspecific",
+                                     TRUE ~ "specific")) %>%
+        # define the types of labelling
+  mutate(labelling_type = case_when(nterm_labelled & k_labelled ~ "Fully-labelled",
+                                    nterm_labelled == TRUE & k_labelled == FALSE ~ "Only N-term-labelled",
+                                    nterm_labelled == FALSE & k_labelled == TRUE ~ "Only K-labelled",
+                                    nterm_labelled == FALSE & k_labelled == FALSE ~ "Unlabelled"),
+         # labelled or not
+         is_labelled = if_else(condition = nterm_labelled | k_labelled,
+                               true = "Labelled",
+                               false = "Not-labelled"),
+         # calculate the ratio of intra peptide labelling
+         intra_peptide_labelling_ratio = nr_tagged_sites / nr_taggable_sites * 100,
+         type_of_nterm_label = case_when(str_detect(assigned_modifications,
+                                                    nterm_modif) ~ "N-term-Dimethyl",
+                                         str_detect(assigned_modifications,
+                                                    "N-term\\(42\\.010[0-9]\\)") ~ "N-term-Acetyl",
+                                         TRUE ~ "Free-Nterm"),
+         location_of_k_labelling = factor(case_when(nr_taggable_Ks > 0 & 
+                                            (nr_taggable_Ks == nr_tagged_Ks) & 
+                                             k_cterm_labelled == TRUE    ~ "Full (C-term K)",
+                                            last_aa == "K"  &             
+                                            nr_taggable_Ks == 1 &
+                                            k_cterm_labelled == TRUE     ~ "Only C-term K",
+                                            last_aa == "K" &
+                                            (nr_tagged_Ks > 0) & 
+                                            k_cterm_labelled == FALSE    ~ "Internal K (K at C-term free)",
+                                            last_aa == "K" &
+                                            (nr_taggable_Ks > 0) & 
+                                            nr_tagged_Ks == 0            ~ "All Ks free (K at C-term free)",
+                                            last_aa != "K" &
+                                            (nr_tagged_Ks > 0) & 
+                                            k_cterm_labelled == FALSE    ~ "Internal K (No K at C-term)",
+                                            last_aa != "K" &
+                                            (nr_taggable_Ks > 0) & 
+                                            nr_tagged_Ks == 0            ~ "All Ks free (No K at Cterm)",
+                                            nr_taggable_Ks == 0          ~ "No K in peptide (No K at Cterm)"),
+                                          levels = c("No K in peptide (No K at Cterm)",
+                                               "All Ks free (No K at Cterm)",
+                                               "Internal K (No K at C-term)",
+                                               "All Ks free (K at C-term free)",
+                                               "Internal K (K at C-term free)",
+                                               "Full (C-term K)"))) %>%
+  mutate(k_at_cterm_status = factor(case_when(location_of_k_labelling == "Full (C-term K)" |
+                                       location_of_k_labelling == "Only C-term K"                    ~ "C-term K tagged",
+                                       location_of_k_labelling == "Internal K (K at C-term free)" |
+                                       location_of_k_labelling == "All Ks free (K at C-term free)"   ~ "C-term K free",
+                                       location_of_k_labelling == "Internal K (No K at C-term)" |
+                                       location_of_k_labelling == "All Ks free (No K at Cterm)" | 
+                                       location_of_k_labelling ==  "No K in peptide (No K at Cterm)" ~ "No K at C-term"),
+                                     levels = c("No K at C-term",
+                                                "C-term K free",
+                                                "C-term K tagged"))) %>% 
+  separate(spectrum,
+           into = c("run", "scan"),
+           sep = "\\.", 
+           extra = "merge",
+           remove = FALSE)
+```
+
+
+## Prep table of 'taggable sites'
+
+```{r}
+get_sites <- function(x){
+
+                    sites  <- str_extract_all(string = x,
+                          pattern = "K",
+                          simplify = TRUE)
+
+                    location <- str_locate_all(string = x,
+                                              pattern = "K")[[1]][,1]
+
+                    location_site <- paste0(location, sites)
+
+                    coll_sites <- paste(location_site,
+                                        collapse = "|")
+
+                    all_sites <- paste0("n|", coll_sites)
+}
+```
+
+
+```{r}
+sites_table1 <- psms %>%
+                    dplyr::select(spectrum, 
+                                  peptide, 
+                                  modified_peptide, 
+                                  assigned_modifications, 
+                                  peptide_length)
+
+sites_table <- sites_table1 %>%
+                    mutate(taggable_site = map_chr(peptide,
+                                                    get_sites)) %>%
+                    separate_rows(taggable_site,
+                                  sep = "\\|") %>%
+                    filter(taggable_site != "") %>%
+                    mutate(taggable_site_position = parse_number(taggable_site)) %>% 
+                    mutate(site_occupation = case_when(taggable_site == "n" & str_detect(string = assigned_modifications,
+                                                                                         pattern = "N-term") ~ "Labelled",
+                                                       taggable_site != "n" & (str_detect(string = assigned_modifications,
+                                                                                          pattern = taggable_site)) ~ "Labelled",
+                                                       TRUE ~ "Free")) %>%
+                    mutate(labelling_location = case_when(site_occupation == "Labelled" & str_detect(taggable_site,
+                                                                                                       "n") ~ "Labelled N-termini",
+                                                          site_occupation == "Labelled" & str_detect(taggable_site,
+                                                                                                       "K") ~ "Labelled Lysine",
+                                                          site_occupation == "Free" & str_detect(taggable_site,
+                                                                                                   "n") ~ "Free N-termini",
+                                                           site_occupation == "Free" & str_detect(taggable_site,
+                                                                                                   "K") ~ "Free Lysine")) %>%
+                    mutate(lysine_location = case_when(taggable_site_position == peptide_length ~ "C-term K",
+                                                       taggable_site_position != peptide_length ~ "internal K",
+                                                       TRUE ~ "N-termini")) 
+
+# generate sites table per run
+sites_table_by_run <- sites_table %>%
+  dplyr::select(spectrum, taggable_site, site_occupation, labelling_location, lysine_location) %>%
+  separate(spectrum,
+           into = c("run", "scan"),
+           sep = "\\.", 
+           extra = "merge",
+           remove = FALSE)
+```
+
+# Counts of PSMs by modification
+
+## Total counts of PSMs by modification and presence of lysine (K)
+
+```{r echo=FALSE}
+n_runs <- length(unique(psms$run))
+
+fig_bar_1_width <- 2*n_runs * 0.625
+```
+
+```{r fig.width=8, fig.height=8}
+#| fig-width: !expr fig_bar_1_width
+#| fig-height: 8
+
+# from the psms object do a bar plot of PSM countsb nterm_labelled (fill) and k_labelled (facet)
+
+psms %>%
+  mutate(
+    run = factor(run),
+    nterm_labelled = if_else(nterm_labelled, "N-term labelled", "N-term unlabelled"),
+    k_labelled = if_else(k_labelled, "K-labelled", "K-unlabelled"),
+    has_k = if_else(nr_taggable_Ks > 0, "Has K", "No K")
+  ) %>%
+  dplyr::group_by(run, nterm_labelled, k_labelled, has_k) %>%
+  dplyr::count() %>%
+  ggplot(aes(x = run, y = n, fill = k_labelled)) +
+  geom_bar(stat = "identity") +
+  # Add total count labels per bar
+  geom_text(
+    data = psms %>%
+      mutate(
+        run = factor(run),
+        nterm_labelled = if_else(nterm_labelled, "N-term labelled", "N-term unlabelled"),
+        k_labelled = if_else(k_labelled, "K-labelled", "K-unlabelled"),
+        has_k = if_else(nr_taggable_Ks > 0, "Has K", "No K")
+      ) %>%
+      dplyr::group_by(run, nterm_labelled, has_k) %>%
+      dplyr::summarise(n = n(), .groups = "drop"), # Summarize total counts
+    mapping = aes(x = run, y = n, label = n),
+    vjust = -0.5,
+    size = 3,
+    color = "black",
+    inherit.aes = FALSE # Prevent inheriting `fill = k_labelled`
+  ) +
+  facet_grid(has_k ~ nterm_labelled) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Counts of PSMs by modification and presence of lysine (K)",
+    subtitle = "Based on total counts of PSMs per run\nPSMs with Ks in position 1 or 2 are excluded\nAcetylated PSMs are excluded",
+    x = "Modification type",
+    y = "Counts"
+  )
+```
+
+## Percentage of labelled PSMs by run: only PSMs with lysine (K)
+
+```{r fig.width=10, fig.height=4}
+#| fig-width: !expr fig_bar_1_width
+#| fig-height: 4.8
+
+psms %>%
+  mutate(run = factor(run),
+         nterm_labelled = if_else(nterm_labelled, "N-term labelled", "N-term unlabelled"),
+         k_labelled = if_else(k_labelled, "K-labelled", "K-unlabelled"),
+         has_k = if_else(
+           nr_taggable_Ks > 0,
+           true = "Has K",
+           false = "No K"
+         )) %>%
+  dplyr::filter(has_k == "Has K") %>%
+  group_by(run, nterm_labelled, k_labelled) %>%
+  dplyr::count() %>%
+  group_by(run, nterm_labelled) %>%
+  mutate(percentage = n / sum(n) * 100) %>%
+  ggplot(aes(x = run,
+             y = percentage,
+             fill = k_labelled)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_stack(vjust = 0.5), 
+            size = 3, 
+            color = "black") +
+  facet_grid(.~nterm_labelled) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Percentage of K-labelled PSMs by run",
+       subtitle = "Based on total counts of PSMs\nPSMs with Ks in position 1 or 2 are excluded\nAcetylated PSMs are excluded",
+       x = "Run",
+       y = "Percentage")
+```
+
+# Characterization of 'taggable' sites
+
+## Overall proportion of sites by modification and type
+
+```{r}
+total_sites <- nrow(sites_table)
+
+
+# count of sites by site occupation
+counts_sites_labelled <- sites_table %>%
+                    group_by(site_occupation) %>%
+                    dplyr::count() %>%
+                    mutate(`% of total` = n/total_sites * 100 %>% round(digits = 2))  %>%
+                    mutate(measure = "Site occupation") %>%
+                    rename(labelling = site_occupation)
+
+# count of sites by labelling type
+counts_sites_labelling_location <- sites_table %>%
+                    group_by(labelling_location) %>%
+                    dplyr::count() %>%
+                    mutate(`% of total` = n/total_sites * 100) %>%
+                    mutate(measure = "Site type") %>%
+                    rename(labelling = labelling_location)
+
+summaries_sites_count <- bind_rows(counts_sites_labelled,
+                                   counts_sites_labelling_location) %>%
+                    dplyr::select(-n) %>%
+                    mutate(`% of total` = round(`% of total`, digits = 2))
+
+# count of sites by K location
+counts_sites_lysine_location <- sites_table %>%
+                    group_by(site_occupation, lysine_location) %>%
+                    dplyr::count() %>%
+                    mutate(`% of total` = n/total_sites * 100) 
+
+
+# level the factors
+summaries_sites_count <- summaries_sites_count %>%
+    mutate(measure = factor(measure,
+                            levels = c("Site occupation",
+                                       "Site type")),
+           labelling = factor(labelling,
+                            levels = c("Free",
+                                       "Labelled",
+                                       "Free Lysine",
+                                       "Free N-termini",
+                                       "Labelled Lysine",
+                                       "Labelled N-termini")))
+```
+
+```{r plot_taggable_sites, fig.width=8, fig.height=2}
+ggplot(summaries_sites_count,
+       mapping = aes(x = measure,
+                     y = `% of total`,
+                     fill = labelling,
+                     width=1)) +
+        geom_bar(position = "stack",
+                 stat = "identity") +
+        coord_flip() + 
+        scale_fill_manual(values = c("#05445E","#FC5404", "#189AB4", "#75E6DA",
+                                      "#F98404", "#F9B208")) +
+        geom_text(
+          position = position_stack(vjust = 0.5),
+          size = 3.5,
+                  aes(label = paste0(`% of total`," %"))) +
+                    ggtitle("% of Amine-reactive site occupancy",
+                            subtitle = "Based on total counts of amine-reactive sites")
+```  
+
+This plot represents the % of amine-reactive sites by their modification and type.
+
+This is based on __PSM counts__, from the `psm.tsv` file of Fragpipe.
+
+Example: this peptide `HADICTLSEKER` contains two amine-reactive sites (N-termini and an internal K). Each one is counted separately to produce the plot above. 
+
+## Characterization of taggable sites per run
+
+```{r}
+total_sites_by_run <- sites_table_by_run %>%
+  group_by(run) %>%
+  summarise(total_sites = n())
+
+# count of sites by site occupation
+counts_sites_labelled_by_run <- sites_table_by_run %>%
+  group_by(run, site_occupation) %>%
+  dplyr::count() %>%
+  left_join(total_sites_by_run, by = "run") %>%
+  mutate(`% of total` = n / total_sites * 100 %>% round(digits = 2)) %>%
+  mutate(measure = "Site occupation") %>%
+  rename(labelling = site_occupation)
+
+# count of sites by labelling type
+counts_sites_labelling_location_by_run <- sites_table_by_run %>%
+  group_by(run, labelling_location) %>%
+  dplyr::count() %>%
+  left_join(total_sites_by_run, by = "run") %>%
+  mutate(`% of total` = n / total_sites * 100) %>%
+  mutate(measure = "Site type") %>%
+  rename(labelling = labelling_location)
+
+summaries_sites_count_by_run <- bind_rows(counts_sites_labelled_by_run,
+                                          counts_sites_labelling_location_by_run) %>%
+  dplyr::select(-n, -total_sites) %>%
+  mutate(`% of total` = round(`% of total`, digits = 2))
+
+# count of sites by K location
+counts_sites_lysine_location_by_run <- sites_table_by_run %>%
+  group_by(run, site_occupation, lysine_location) %>%
+  dplyr::count() %>%
+  left_join(total_sites_by_run, by = "run") %>%
+  mutate(`% of total` = n / total_sites * 100)
+
+# level the factors
+summaries_sites_count_by_run <- summaries_sites_count_by_run %>%
+  mutate(measure = factor(measure,
+                          levels = c("Site occupation",
+                                     "Site type")),
+         labelling = factor(labelling,
+                            levels = c("Free",
+                                       "Labelled",
+                                       "Free Lysine",
+                                       "Free N-termini",
+                                       "Labelled Lysine",
+                                       "Labelled N-termini")))    
+```
+
+```{r echo=FALSE}
+nr_runs <- length(unique(sites_table_by_run$run))
+
+fig_height <- nr_runs * 1.2
+```
+
+
+```{r plot_taggable_sites_per_run}
+#| fig-width: 8
+#| fig-height: !expr fig_height
+
+#, fig.width=4, fig.height=16, fig.asp=0.2
+ggplot(summaries_sites_count_by_run,
+  mapping = aes(x = measure,
+      y = `% of total`,
+      fill = labelling,
+      width=1)) +
+   geom_bar(position = "stack",
+       stat = "identity") +
+   coord_flip() + 
+   scale_fill_manual(values = c("#05445E","#FC5404", "#189AB4", "#75E6DA",
+             "#F98404", "#F9B208")) +
+   geom_text(
+    position = position_stack(vjust = 0.5),
+    size = 3.5,
+        aes(label = paste0(`% of total`," %"))) +
+   facet_grid(run ~.) +
+   ggtitle("% of Amine-reactive site occupancy per run",
+      subtitle = "Based on total counts of amine-reactive sites per run")
+```  
+
+
+

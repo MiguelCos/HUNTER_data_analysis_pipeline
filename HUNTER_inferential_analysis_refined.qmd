@@ -1,0 +1,1699 @@
+---
+title: "Inferential analysis tests v4 | "
+author: "Miguel Cosenza-Contreras"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    embed-resources: true
+editor: source
+execute:
+  eval: true
+  echo: false
+  error: false
+  warning: false
+  message: false
+---
+
+# Required R packages
+
+Check installation of required packages:
+
+```{r}
+bioconductor <- c(
+  "limma",
+  "clusterProfiler",
+  "SummarizedExperiment",
+  "ComplexHeatmap"
+)
+
+cran_pack <- c(
+  "here",
+  "janitor",
+  "seqinr",
+  "ggpubr",
+  "ggrepel",
+  "pheatmap",
+  "RColorBrewer",
+  "rrcovNA",
+  "circlize"
+)
+```
+
+```{r}
+# check and install CRAN packages
+
+for (package in cran_pack) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+  }
+}
+
+# check and install bioconductor packages
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+  
+}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+```
+
+
+__TermineR installation and/or loading__
+
+```{r}
+if (!require("TermineR", quietly = TRUE)){        
+    devtools::install_github("MiguelCos/TermineR")
+}
+
+
+if (!require("diann", quietly = TRUE)){        
+    devtools::install_github("vdemichev/diann-rpackage")
+}
+
+
+#detach("package:TermineR", unload=TRUE)
+```
+
+__Required R packages__
+
+## Fixed
+
+```{r load_packages, warning=FALSE, message=FALSE}
+## Required packages ----
+library(TermineR)
+
+library(tidyverse)
+library(limma)
+library(clusterProfiler)
+library(here)
+library(janitor)
+library(seqinr)
+library(ggpubr)
+library(ggrepel)
+library(SummarizedExperiment)
+library(pheatmap)
+library(RColorBrewer)
+library(rrcovNA)
+library(ComplexHeatmap)
+library(circlize) 
+library(dagLogo)
+```
+
+## Variable
+
+```{r}
+library(org.Sc.sgd.db) # change to the organism of interest
+# library(org.Hs.eg.db) for human 
+# library(org.Mm.eg.db) for mouse
+# library(org.Rn.eg.db) for rat
+# library(org.At.tair.db) for arabidopsis
+```
+
+# Define comparisons and parameters
+
+## Location of DIA-NN `report.tsv`
+
+```{r}
+diann_report_location <- here("fp_searches/fp_hunter_dia/diann-output/report.tsv")
+```
+
+## Location of experimental annotation file
+
+```{r}
+location_annotation <- here("fp_searches/fp_hunter_dia/experiment_annotation_corrected.tsv")
+```
+
+## Location of TargetP prediction annotation file 
+
+```{r}
+# set to NULL if not available
+# targetp_annotation <- NULL
+
+targetp_location <- here("annotations/yeast_uniprot_summary.targetp2")
+```
+
+## Location of fasta file
+
+```{r}
+fasta_location <- here("fp_searches/fp_hunter_dia/protein.fas")
+```
+
+## Define parameters of HUNTER experiment
+
+Define 'sense' of experimental protease. "C" cuts at carboxilic side (i.e., trypsin), "N" at aminic side. 
+
+```{r echo=TRUE}
+# sense 
+sense_protease <- "C" 
+```
+
+Define 'specificity' of the protease. Example: `"K|R"` for trypsin (cuts at K or R).
+
+```{r echo=TRUE}
+specificity_protease <- "K|R"
+```
+
+Define 'organism' of the proteome. "human_iso" for human isoforms. Run `help(annotate_neo_termini)` to see available organisms.
+
+```{r echo=TRUE}
+organism_annotation <- "yeast"
+```
+
+## Exploris or QE?
+
+```{r echo=TRUE}
+# modify this. options "EX" or "QE"
+
+instrument <-"EX" #"EX" # or "QE"
+```
+
+```{r}
+# don't modify this! just execute
+instrument <- if (instrument == "EX") {
+  "EX0"
+} else if (instrument == "QE"){
+  "QE0"
+} else {
+  stop("Instrument definition not recognized")
+}
+```
+
+## Define contrasts 
+
+```{r echo=TRUE}
+# Define your contrasts in a named vector
+defined_contrasts <- c(
+  Oct1_vs_WT = "Oct1 - WT"
+)
+```
+
+```{r}
+# Convert the contrasts into a format that makeContrasts can accept
+contrasts_list <- lapply(
+  
+  names(defined_contrasts), 
+  
+  function(name) {
+    contrast <- defined_contrasts[[name]]
+    parse(text = contrast)[[1]]
+    }
+  )
+```
+
+## Define adjusted P-value and log2-fold change thresholds
+
+```{r echo=TRUE}
+# Classify features as upregulated, downregulated, or non-changing
+fc_threshold <- 0.5  # Threshold for log fold-change
+pval_threshold <- 0.05  # Threshold for adjusted p-value significance
+```
+
+## Define prefix for output tables
+
+```{r echo=TRUE}
+pre_fix <- "nv011_oct1_yeast_extend_cleave_area_v2"
+```
+
+## Acceptable missingness 
+
+Defining acceptable missingness based on the number of replicates per condition. 
+
+Example: `1 / 4` would mean that a feature can be missing in up to 1 out of 4 replicates per condition. If it is missing in more than 1 replicate, it would be considered as 'completeley missing' in one condition.
+
+```{r echo=TRUE}
+missing_accepted <- 1 / 4
+```
+
+### Min. probability imputation sampling parameters
+
+Recommended to be left as is (`tune_sigma <- 1` and `tune_quantile = 0.01`. Sigma values `< 1` would produce a 'sharper' distribution of minimal values to sample from. It will represent a fraction of the variance of the general distribution of abundances. `tune_quantile` would define the minimal from the general abundance distribution. `0.01` would define the minimal value as the 1% quantile of all abundances.
+
+```{r echo=TRUE}
+# parameters for min probability distribution sampling for 'complete missing' features
+# tune_sigma is not recommended to change.
+tune_sigma <- 1  
+# set tune_quantile to a very small number (like 0.0000001) if you expect diff. abundance from proteins already low abundant.
+tune_quantile <- 0.00001 
+```
+
+## Exclusion criteria:
+
+Change to `NULL` if you don't want to filter by N-terminal modification. Otherwise list the modifications you want to keep. Example: `c("Dimethyl")` will keep only N-term dimethylated peptides. `c("Dimethyl", "Acetyl")` would keep both acetylated and dimethylated N-termini for further analysis.
+
+```{r echo=TRUE}
+# keep only features with the following N-terminal modifications
+keep_only <- c(
+  "Dimethyl", "Acetyl"
+)
+```
+
+Change to `NULL` if you don't want to filter by N-terminal modification. Otherwise list the modifications you want to keep. Example: `c("R")` will exclude all peptide features with a precesing arginine; `c("R", "K")` would exclude all peptide features with a preceding arginine or lysine... etc. 
+
+```{r echo=TRUE}
+# exclude features if the preceding amino acid is: (i.e., "R" for trypsin)
+
+exclude_preceding <- c(
+  "R" # change this to NULL if your pull-out effiency was good.
+)
+```
+
+# Load required data
+
+## Load the peptide-level quantitation data (`diann_adapter`)
+
+### Using sum of precursors
+
+```{r}
+df_from_diann <- diann_adapter(
+  diann_report_location,
+  summarization = "SUM"
+  ) %>%
+  filter(str_detect(protein, "^cRAP\\-", negate = TRUE)) 
+```
+
+## Load sample annotation data
+
+```{r echo=TRUE}
+# load data
+sample_annotation <- read_delim(
+  location_annotation
+  ) 
+```
+
+# Load and prepare protein annotation data
+
+```{r}
+report_tsv <- read_tsv(diann_report_location) %>%
+  janitor::clean_names()
+
+#names(report_tsv)
+
+prot2gene <- report_tsv %>%
+  dplyr::select(protein = protein_ids,
+                gene = genes) %>%
+  distinct()
+
+```
+
+## TargetP predictions
+
+```{r}
+# if targetp_location is not NULL, run the following code
+
+if (is.null(targetp_location)) {
+  
+  message("TargetP annotation not defined")
+  
+} else {
+  message("TargetP annotation defined. Loading")
+  
+  targetp_annotation <- read_tsv(targetp_location,
+                               skip = 1) %>%
+  clean_names() %>%
+  separate(
+    number_id,
+    into = c("trembl", "protein", "uniprot_accession"),
+    sep = "\\|",
+    remove = FALSE
+  ) %>%
+  dplyr::rename(
+    protein_header = number_id
+  ) %>%
+  mutate(
+    targetp_p1_position = str_remove(cs_position,
+                                     "CS pos:")
+  ) %>%
+  mutate(
+    targetp_p1_position = str_remove(targetp_p1_position,
+                                     # everything after the first "-"
+                                     "-.*")
+  ) %>%
+  mutate(
+    targetp_p1_position = as.numeric(targetp_p1_position)
+  ) %>%
+  filter(
+    !is.na(targetp_p1_position)
+  ) %>% 
+  dplyr::select(
+    protein,
+    targetp_category = prediction,
+    targetp_p1_position
+  ) 
+}
+```
+
+# Annotation of peptide specificities
+
+```{r}
+annotated_df_quant <- annotate_neo_termini(
+  peptides_df = df_from_diann, 
+  fasta_location = fasta_location,
+  sense = sense_protease, 
+  specificity = specificity_protease,
+  organism = organism_annotation) %>% 
+  mutate(cleav_len = nchar(cleavage_sequence)) %>%
+  relocate(cleav_len,
+           .after = processing_annotation_end) %>%
+  filter(!is.na(peptide_start))
+
+if(!is_empty(targetp_annotation)){
+  
+  annotated_df_quant <- annotated_df_quant %>%
+  left_join(., targetp_annotation) %>%
+  relocate(
+    cleav_len,
+    .after = cleavage_sequence
+  ) %>%
+  mutate(
+    targetp_matches_p1_prime = case_when(
+      abs(as.numeric(p1_position) - targetp_p1_position) < 4 ~ TRUE,
+        TRUE ~ FALSE
+    )
+  ) %>%
+  mutate(
+    processing_type_targetp = case_when(
+      targetp_matches_p1_prime == TRUE & targetp_category == "SP" ~ "SIGNAL",
+      targetp_matches_p1_prime == TRUE & targetp_category == "mTP" ~ "mTP",
+      targetp_matches_p1_prime == TRUE & targetp_category == "cTP" ~ "cTP",
+      targetp_matches_p1_prime == TRUE & targetp_category == "luTP" ~ "luTP",
+      targetp_matches_p1_prime == FALSE ~ "not_canonical",
+      is.na(targetp_matches_p1_prime) ~ "not_canonical",
+      TRUE ~ "not_canonical"
+    )) %>%
+  mutate(
+    processing_type_terminer = case_when(
+      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical") ~ processing_type_targetp,
+      (uniprot_processing_type == processing_type_targetp) & (processing_type_targetp == "not_canonical") ~ uniprot_processing_type,
+      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical_no_procc_annot") ~ uniprot_processing_type,
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical") ~ processing_type_targetp,
+      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp == "not_canonical") ~ uniprot_processing_type,
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical_no_procc_annot") ~ processing_type_targetp,
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical") ~ processing_type_targetp,
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical_no_procc_annot") ~ processing_type_targetp,
+      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp != "not_canonical") ~ processing_type_targetp,
+      TRUE ~ "not_canonical"
+    )
+  ) %>%
+  mutate(
+    source_processing_annotation = case_when(
+      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical") ~ "Other",
+      (uniprot_processing_type == processing_type_targetp) & (processing_type_targetp == "not_canonical") ~ "Other",
+      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical_no_procc_annot") ~ "Other",
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical") ~ "TargetP",
+      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp == "not_canonical") ~ "Uniprot",
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical_no_procc_annot") ~ "Other",
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical") ~ "Conflict/both",
+      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical_no_procc_annot") ~ "Conflict/both",
+      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp != "not_canonical") ~ "Conflict/both",
+      TRUE ~ "not_canonical"
+    )
+  ) %>%
+  mutate(
+    source_processing_annotation = case_when(
+      str_detect(processing_type_terminer, "not_canonical") ~ "Other", 
+      TRUE ~ source_processing_annotation
+    )) %>%
+  mutate(
+    processing_type = case_when(
+      str_detect(processing_type_terminer, "INIT_MET") ~ "P2",
+      processing_type_terminer == "Intact_ORF" ~ "P1",
+      processing_type_terminer == "mTP" ~ "MTS", 
+      processing_type_terminer == "SIGNAL" ~ "SP",
+      processing_type_terminer == "not_canonical_no_procc_annot" ~ "not_canonical",
+      TRUE ~ processing_type_terminer
+    )
+  ) %>%
+  mutate(
+    difference = case_when(
+      targetp_matches_p1_prime == TRUE ~ p1_position - targetp_p1_position,
+      matches_p1_prime == TRUE & targetp_matches_p1_prime == FALSE ~ p1_position - processing_annotation_end,
+    )
+  ) %>%
+  mutate(
+    processing_type = factor(
+      processing_type,
+      levels = c("P1", "P2", "SP", "MTS", "cTP", "TRANSIT", "PROPEP", "not_canonical")
+    )
+  ) %>%
+  relocate(targetp_category,
+           targetp_p1_position,
+           targetp_matches_p1_prime,
+           processing_type_targetp,
+           processing_type_terminer,
+           processing_type,
+           source_processing_annotation,
+           .after = processing_annotation_end) 
+  
+}
+```
+
+## Filtering features
+
+```{r}
+pre_filter_annotated_df_quant <- annotated_df_quant
+
+if (!is.null(keep_only)) {
+  
+  annotated_df_quant <- pre_filter_annotated_df_quant %>%
+    dplyr::filter(nterm_modif %in% keep_only)
+
+}
+
+if (!is.null(exclude_preceding)) {
+  
+  annotated_df_quant <- annotated_df_quant %>%
+    dplyr::filter(!(p1_residue %in% exclude_preceding))
+
+}
+```
+
+```{r}
+# get peptide annotation
+nterannot <- annotated_df_quant %>%
+  dplyr::select(nterm_modif_peptide:protein_sequence)
+```
+
+# Visualize number of peptide with N-term modification by Processing Type
+
+## Before application of exclusion criteria 
+
+```{r}
+count_pre_filter_termini_annot <- pre_filter_annotated_df_quant %>% 
+  mutate(
+    nterm_modif = case_when(
+      nterm_modif %in% c("Acetyl", "Dimethyl",
+                          str_extract(nterm_modif, "TMT")) ~ nterm_modif,
+      nterm_modif == "n" ~ "No modif.",
+      TRUE ~ "Pyro-Glu"
+    )
+  ) %>%
+  group_by(processing_type, nterm_modif) %>% 
+  summarise(n = n()) %>%
+  ungroup() 
+```
+
+```{r fig.width=8, fig.height=5.6}
+count_pre_filter_termini_annot %>% 
+  ggplot(aes(x = processing_type, 
+             y = n,
+             fill = nterm_modif)) +
+  coord_flip() +
+  geom_bar(stat = "identity") +
+  #geom_text_repel(aes(label = n),
+  #                size = 2, 
+  #                position = position_stack(),
+  #                max.overlaps = Inf) +
+  geom_text(aes(label = n), 
+            hjust = 1, 
+            size = 3.5, 
+            position = "stack") +
+  scale_fill_manual(values = c("No modif." = "#262626",
+                               "Pyro-Glu" = "#CCAD8F",
+                               "Acetyl" = "#E67F0D", 
+                               "Dimethyl" = "#22577A")) +
+  labs(title = "Nr of N-terminal peptides by their processing category",
+       subtitle = paste0("Before exclusion of sparse features, unlabelled N-termini\nand peptides with ", paste(exclude_preceding, collapse = " and "), " as preceding amino acid."),
+       fill = "N-terminal\nmodification") +
+  labs(y = "Number of Peptides by matching type",
+       x = "Type of matching processing information",
+       caption = paste0("Sparse features are those missing in \na max of ", missing_accepted*100,"% of samples per each condition.")) +
+   theme(axis.text.x = element_text(hjust = 0.5, size = 10),
+         axis.text.y = element_text(hjust = 1, size = 10),
+         panel.background = element_blank(),
+         panel.grid.major = element_line(color = "grey"),
+         panel.border = element_rect(fill=NA, linewidth=1.5),
+         axis.title=element_text(size=12,face="bold"))
+```
+
+## After applying exclusion criteria  
+
+```{r}
+count_termini_annot <- annotated_df_quant %>% 
+  group_by(processing_type, nterm_modif) %>% 
+  summarise(n = n()) 
+
+count_termini_annot_source <- annotated_df_quant %>% 
+  group_by(processing_type, source_processing_annotation) %>% 
+  summarise(n = n()) 
+```
+
+```{r fig.width=8.5, fig.height=5.6}
+count_termini_annot %>% 
+  ggplot(aes(x = processing_type, 
+             y = n,
+             fill = nterm_modif)) +
+  coord_flip() +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), 
+            hjust = 1, 
+            size = 3.5, 
+            position = "stack") +
+  scale_fill_manual(values = c("Acetyl" = "#E67F0D", 
+                               "Dimethyl" = "#22577A")) +
+  labs(title = "Nr of N-terminal peptides by their processing category",
+       subtitle = paste0("After exclusion of sparse features and keeping only\n",paste(keep_only, collapse = " and "),"-N-terminally modified peptides.\nExcluding peptides with ", paste(exclude_preceding, collapse = " and "), " as preceding amino acid.")
+         ) +
+  labs(y = "Number of Peptides by matching type",
+       x = "Type of matching processing information",
+       caption = paste0("Sparse features are those missing in \na max of ", missing_accepted*100,"% of samples per each condition.",
+       fill = "N-terminal\nmodification")) +
+   theme(axis.text.x = element_text(hjust = 0.5, size = 10),
+         axis.text.y = element_text(hjust = 1, size = 10),
+         panel.background = element_blank(),
+         panel.grid.major = element_line(color = "grey"),
+         panel.border = element_rect(fill=NA, linewidth=1.5),
+         axis.title=element_text(size=12,face="bold"))
+```
+
+## Number of peptide modification by source of processing annotation 
+
+```{r}
+count_termini_annot_source
+```
+
+```{r fig.width=7, fig.height=4}
+count_termini_annot_source %>% 
+  ggplot(aes(x = processing_type, 
+             y = n,
+             fill = source_processing_annotation)) +
+  coord_flip() +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), 
+            hjust = 1, 
+            size = 3.5, 
+            position = "stack") +
+  scale_fill_manual(values = c("Other" = "#CAD2C5", 
+                               "Uniprot" = "#59C3C3",
+                               "TargetP" = "#84A98C", 
+                               "Conflict/both" = "darkgrey")) +
+  #ylim(0, max(count_termini$n) + 500) +
+  labs(title = "Nr of N-terminal peptides by their source of\n processing category") + 
+  labs(y = "Number of Peptides by matching type",
+       x = "Type of matching processing information",
+       fill = "Source") +
+   theme(axis.text.x = element_text(hjust = 0.5, size = 10),
+         axis.text.y = element_text(hjust = 1, size = 10),
+         panel.background = element_blank(),
+         panel.grid.major = element_line(color = "grey"),
+         panel.border = element_rect(fill = NA, linewidth = 1.5),
+         axis.title = element_text(size = 12, face= "bold"))
+
+```
+
+```{r}
+count_termini_annot_source %>%
+  kableExtra::kable() 
+```
+
+# Preparation of quantitative data
+
+## Set up `SummarizedExperiments` objects 
+
+### Prep experimental design information
+
+```{r}
+experimental_design <- sample_annotation %>% 
+                    filter(condition != "empty") %>%
+                    mutate(replicate = bio_replicate)
+```
+
+### Prep quant information
+
+```{r}
+# get peptide quantitation
+quant_peptide_data <- annotated_df_quant %>%
+  dplyr::select(nterm_modif_peptide, all_of(experimental_design$sample)) 
+```
+
+### Processing of missing values (two-step imputation)
+
+#### Characterization of missingness and exclusion of sparse features
+
+```{r}
+# Step 1: Pit the data to a long format
+quant_peptide_data_long <- quant_peptide_data %>%
+  pivot_longer(
+    cols = -nterm_modif_peptide,
+    names_to = "sample",
+    values_to = "Abundance"
+  ) %>%
+  left_join(., experimental_design) %>%
+  separate(
+    col = sample_name,
+    into = c("Condition", "Replicate"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  dplyr::select(
+    -Condition
+  )
+
+# Step 2: Calculate missingness per peptide per condition
+
+# Determine the total number of replicates per condition
+Total_Replicates <- quant_peptide_data_long %>%
+  group_by(condition) %>%
+  summarise(Total_Replicates = n_distinct(Replicate)) %>%
+  ungroup()
+
+peptide_missingness <- quant_peptide_data_long %>%
+  group_by(nterm_modif_peptide, condition) %>%
+  summarise(
+    Num_Quantified_per_cond = sum(!is.na(Abundance)),
+    Num_Missing_per_cond = sum(is.na(Abundance)),
+    .groups = 'drop'
+  ) %>%
+  left_join(Total_Replicates, by = "condition") %>%
+  mutate(
+    Proportion_Missing = Num_Missing_per_cond / Total_Replicates,
+    Missingness_Category = case_when(
+      Proportion_Missing <= 1 & Proportion_Missing > missing_accepted ~ "Total_Missing",
+      Proportion_Missing > 0 & Proportion_Missing <= missing_accepted ~ "Partial_Missing",
+      Proportion_Missing == 0 ~ "Complete"
+    )
+  ) %>%
+  ungroup() 
+
+# check for features that are consistently below threshold in all samples
+
+peptide_missingness_all <- peptide_missingness %>%
+  group_by(nterm_modif_peptide) %>%
+  summarize(
+    all_conditions_missing = all(Proportion_Missing > missing_accepted),
+    .groups = 'drop'
+  )
+
+peptide_missingness <- left_join(x = peptide_missingness,
+                                 y = peptide_missingness_all,
+                                 by = "nterm_modif_peptide")
+
+sparse_features <- peptide_missingness %>% 
+  filter(all_conditions_missing == TRUE) %>%
+  pull(nterm_modif_peptide) %>%
+  unique()
+
+# Step 3: Filter out sparce features and merge missingness info back to the main data frame
+quant_peptide_data_long <- quant_peptide_data_long %>% 
+  filter(!nterm_modif_peptide %in% sparse_features) %>%
+  left_join(peptide_missingness)
+```
+
+#### Missing value imputation 
+
+```{r}
+# Step 4: Impute based on missingness category
+
+# Step 4.1: Impute "Total missing" peptides by minimum probability distribution
+
+## Define gaussian distribution based on min values to sample from
+
+set.seed(101)
+
+n_features <- length(unique(quant_peptide_data_long$nterm_modif_peptide))
+
+# calculate missingness of features overall
+peptide_missingness_overall <- quant_peptide_data_long %>%
+  group_by(nterm_modif_peptide) %>%
+  summarise(
+    Num_Quantified_overall = sum(!is.na(Abundance)),
+    Num_Missing_overall = sum(is.na(Abundance)),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Proportion_Missing_overall = Num_Quantified_overall / n_features
+  ) %>%
+  ungroup()
+
+# get list of features present in at least 50% of the samples
+features_in_more_50perc <- peptide_missingness_overall %>%
+  filter(Proportion_Missing_overall <= 0.5) %>%
+  pull(nterm_modif_peptide)
+
+# calculate protein-wise SD on features present in 50% or more samples
+protein_wise_sd <- quant_peptide_data_long %>%
+  filter(nterm_modif_peptide %in% features_in_more_50perc) %>%
+  group_by(nterm_modif_peptide) %>%
+  summarise(
+    sd = sd(Abundance, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+sd_median <- median(protein_wise_sd$sd, na.rm = TRUE) * tune_sigma
+
+# calculate min quantile value per sample for minimal value distribution 
+min_quantile_sample <- quant_peptide_data_long %>% 
+  group_by(sample_name) %>%
+  summarise(
+    min_per_sample = quantile(Abundance, prob = tune_quantile, na.rm = TRUE)
+  ) 
+
+# function for random sampling from minimal value distribution 
+sample_gausssian <- function(x){
+  
+  sample(
+    rnorm(n_features, mean = x, sd = sd_median),
+    1
+  )
+  
+}
+
+# merge min quantile values per sample 
+quant_peptide_data_long2 <- quant_peptide_data_long %>%
+  left_join(min_quantile_sample) %>%
+  rowwise() %>%
+  mutate(
+    abundance_imputed = ifelse(
+      is.na(Abundance) & Missingness_Category == "Total_Missing",
+      yes = sample_gausssian(min_per_sample),
+      no = Abundance
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    imputation_method = case_when(
+      is.na(Abundance) & Missingness_Category == "Total_Missing" ~ "minProb_dist",
+      is.na(Abundance) & Missingness_Category == "Partial_Missing" ~ "impSeqRob",
+      Missingness_Category == "Complete" ~ "not_imputed",
+      !is.na(Abundance) ~ "not_imputed"
+    )
+  )
+
+# Step 4.2: Impute "Partial missing" peptides
+
+# Pivot to wide format
+df_example_partial_missing_wide <- quant_peptide_data_long2 %>%
+  dplyr::select(nterm_modif_peptide, sample, abundance_imputed) %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = abundance_imputed
+  )
+
+# transform into matrix
+mat_example_partial_missing_wide <- df_example_partial_missing_wide %>%
+  dplyr::select(nterm_modif_peptide, starts_with(instrument)) %>%
+  column_to_rownames("nterm_modif_peptide") %>%
+  as.matrix()
+
+# execute impSeqRob
+q_example_partial_missing_wide_imp <- impSeqRob(mat_example_partial_missing_wide)
+
+mat_example_partial_missing_wide_imp <- q_example_partial_missing_wide_imp$x
+
+# Step 5: Get final data frame of imputed values
+
+df_example_partial_missing_imp <- mat_example_partial_missing_wide_imp %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "nterm_modif_peptide") %>%
+  pivot_longer(
+    cols = -nterm_modif_peptide,
+    names_to = "sample",
+    values_to = "Abundance"
+  ) %>%
+  left_join(.,quant_peptide_data_long2 %>% 
+              dplyr::select(-Abundance, -abundance_imputed))
+```
+
+```{r}
+# get summary table of missingness and imputation approach by feature observation
+
+imputation_summary_table <- df_example_partial_missing_imp %>%
+  dplyr::select(
+    nterm_modif_peptide, 
+    sample, 
+    sample_name, 
+    Num_Quantified_per_cond,
+    Num_Missing_per_cond,
+    Proportion_Missing,
+    Total_Replicates,
+    Missingness_Category, 
+    imputation_method
+  ) %>% 
+  distinct() 
+```
+
+```{r}
+quant_peptide_data_imputed <- df_example_partial_missing_imp %>% 
+dplyr::select(nterm_modif_peptide, sample, Abundance) %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = Abundance
+  )
+```
+
+```{r}
+### Generate matrix object for imputed data
+mat_quant_pept_imp <- quant_peptide_data_imputed %>%
+  column_to_rownames("nterm_modif_peptide") %>%
+  as.matrix()
+```
+
+### Peptide annotation information 
+
+```{r}
+annotated_df_quant_no_sparse <- annotated_df_quant %>%
+  filter(nterm_modif_peptide %in% df_example_partial_missing_imp$nterm_modif_peptide)
+```
+
+```{r}
+# get peptide annotation
+nterannot <- annotated_df_quant_no_sparse %>%
+  dplyr::select(nterm_modif_peptide:protein_sequence)
+```
+
+### Generate `SummarizedExperiment` object 
+
+```{r}
+se_pept_imp <- SummarizedExperiment(
+  assays = list(counts = mat_quant_pept_imp),
+  colData = experimental_design,
+  rowData = nterannot)
+```
+
+# Differential abundance analysis
+
+## Prepare abundance matrices
+
+```{r}
+abundance_matrix_sum_imp <- assay(se_pept_imp)
+```
+
+## Prepare design matrix
+
+```{r}
+condition <- colData(se_pept_imp)$condition
+
+design <- model.matrix(~ 0 + condition)
+
+rownames(design) <- rownames(colData(se_pept_imp))
+
+colnames(design) <- str_remove(colnames(design), "condition")
+```
+
+```{r}
+# Use do.call to pass the contrasts dynamically
+cont.matrix <- do.call(makeContrasts, 
+                       c(contrasts_list, 
+                         list(levels = design)))
+```
+
+## Run differential abundance analysis
+
+### Limma execution
+
+```{r}
+# Run the differential abundance analysis
+
+fit_imp <- lmFit(object = abundance_matrix_sum_imp, 
+                 design = design, 
+                 method = "robust") 
+
+fit2_imp <- contrasts.fit(fit_imp, 
+                          cont.matrix)
+
+fit2_imp <- eBayes(fit2_imp)
+```
+
+### Generate topTables
+
+```{r}
+get_top_tables_imp <- function(x){
+  
+  topTable(fit2_imp, 
+           coef = x, 
+           number = Inf,
+           adjust.method = "BH") %>%
+    rownames_to_column(var = "nterm_modif_peptide") %>%
+    left_join(., as.data.frame(rowData(se_pept_imp)))
+}
+```
+
+```{r}
+# do a map function to generate a topTable for each contrast
+
+topTables_imp <- purrr::map(defined_contrasts,
+                            get_top_tables_imp)
+
+all_toptables <- bind_rows(topTables_imp, 
+                              .id = "contrast") %>% 
+  left_join(., prot2gene)
+```
+
+# Visualization of differential abundance analysis
+
+## Volcano plots 
+
+```{r}
+# Create a new column for -log10(adj.P.Val)
+all_toptables <- all_toptables %>%
+  mutate(`-log10_adj.P.Val` = -log10(adj.P.Val))
+
+all_toptables <- all_toptables %>%
+  mutate(
+    regulation = case_when(
+    logFC > fc_threshold & adj.P.Val < pval_threshold ~ "upregulated",
+    logFC < -fc_threshold & adj.P.Val < pval_threshold ~ "downregulated",
+    TRUE ~ "non-changing"),
+    label = paste0(gene, 
+                   "_",
+                   str_replace(nterm_modif_peptide, 
+                               "_", 
+                               "-"),
+                   "_", 
+                   p1_prime_position, 
+                   "_",
+                   cleavage_site),
+    label_min = paste0(gene,
+                    "_",
+                   nterm_modif, 
+                   "_", 
+                   p1_prime_position, 
+                   "_",
+                   cleavage_site)
+    ) 
+
+# Count differentially abundant features for overlay text
+counts <- all_toptables %>%
+  filter(regulation != "non-changing") %>%
+  group_by(contrast) %>%
+  summarise(count = n())
+```
+
+### 'Basic' volcano
+
+```{r fig.height=5, fig.width=8}
+# Create the volcano plot
+volcano_gg <- ggplot(all_toptables, 
+                     aes(x = logFC, 
+                         y = `-log10_adj.P.Val`, 
+                         color = regulation,
+                         label = label
+                         )) +
+  geom_point(alpha = 0.7) +
+  geom_hline(yintercept = -log10(pval_threshold), 
+             linetype = "dashed", 
+             color = "red") + # Threshold line
+  scale_color_manual(values = c("upregulated" = "red", 
+                                "downregulated" = "blue", 
+                                "non-changing" = "grey")) +
+  facet_grid(~ contrast) +  # Facet by contrast (rows) and imputation (columns)
+  theme_minimal() +
+  labs(x = "Log Fold Change (Oct1 KO vs WT)", 
+       y = "-log10(adjusted P-value)", 
+       color = "Regulation",
+       caption =  "Features on the right are increased in Oct1 KO") +
+  theme(
+    strip.text.x = element_text(size = 10),
+    strip.text.y = element_text(size = 7),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    # add legend to the bottom
+    legend.position = "bottom"
+  ) +
+  geom_text(data = counts, aes(x = Inf, y = Inf, label = count),
+            hjust = 1.1, vjust = 1.5, size = 4, color = "black")  # Overlay text with counts
+
+print(volcano_gg)
+```
+
+### 'Labelled' volcano
+
+```{r fig.height=7, fig.width=14.5}
+# filter from toptable
+all_toptables_label <- all_toptables %>%
+  # get top 10 features with smaller p-value 
+  group_by(contrast, regulation) %>%
+  slice_min(n = 10, order_by = adj.P.Val) %>%
+  ungroup()
+
+top_tab_label_up <- all_toptables_label %>%
+  filter(regulation == "upregulated") 
+
+top_tab_label_down <- all_toptables_label %>%
+  filter(regulation == "downregulated")
+
+volcano_labelled <- ggplot(all_toptables, 
+                     aes(x = logFC, 
+                         y = `-log10_adj.P.Val`, 
+                         color = regulation,
+                         label = label
+                         )) +
+  geom_point(alpha = 0.7) +
+  geom_hline(yintercept = -log10(pval_threshold), 
+             linetype = "dashed", 
+             color = "red") + # Threshold line
+  scale_color_manual(values = c("upregulated" = "red", 
+                                "downregulated" = "blue", 
+                                "non-changing" = "grey")) +
+  #facet_grid(~ contrast) +  # Facet by contrast (rows) and imputation (columns)
+  theme_minimal() +
+  labs(x = "Log Fold Change (Oct1 KO vs WT)", 
+       y = "-log10(adjusted P-value)", 
+       color = "Regulation",
+       caption = "Label interpretation:\nProtein_N-terminal modification_Position_Cleavage site\nFeatures on the right are increased in Oct1 KO") +
+  theme(
+    strip.text.x = element_text(size = 10),
+    strip.text.y = element_text(size = 7),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    # add legend to the bottom
+    legend.position = "bottom"
+  ) +
+  geom_text(data = counts, aes(x = Inf, y = Inf, label = count),
+            hjust = 1.1, vjust = 1.5, size = 4, color = "black") + # Overlay text with counts
+  geom_text_repel(
+    data = top_tab_label_down,
+    aes(label = label_min),
+    color = "black",
+    nudge_x = -6,
+    size = 4, 
+    direction = "y",
+    hjust = "right",
+  ) + 
+  geom_text_repel(
+    data = top_tab_label_up,
+    aes(label = label_min),
+    color = "black",
+    nudge_x = 6,
+    size = 4, 
+    direction = "y",
+    hjust = "left",
+  ) + 
+  # extend the x-axis to include the labels
+  scale_x_continuous(expand = c(0.1, 0.1)) 
+
+print(volcano_labelled)
+```
+
+## Number of diff. abund. features by contrast 
+
+```{r fig.width=6, fig.height=3}
+# barplot for counts by contrast and method
+
+counts %>%
+  ggplot(aes(x = contrast, y = count)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "#47A8BD") +
+  # add geom_text on top of the bars with the numbers
+  geom_text(aes(label = count), vjust = 0.5, size = 3) +
+  labs(title = "Nr of differentially abundant features by contrast",
+       x = "Contrast",
+       y = "Nr of features") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+## Number of quantitative observations by type of imputation 
+
+```{r fig.width=5.3, fig.height=3.5}
+# barplot for counts by contrast and method
+
+imputation_summary_table %>%
+  ggplot(aes(x = imputation_method, fill = imputation_method)) +
+  geom_bar(
+    #position = "dodge"
+    fill = "#47A8BD"
+    ) +
+  # add geom_text on top of the bars with the numbers
+  geom_text(aes(label = ..count..), stat = "count", vjust = 0.5, size = 3) +
+  labs(title = "Nr of quantitative observations by type of imputation",
+       subtitle = "After exclusion of sparse features",
+       x = "Imputation type",
+       y = "Nr of quantitative observations") +
+  #facet_grid(imputation ~ linear_model) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+# Visualize regulated termini by processing category
+
+```{r}
+regulated_termini <- all_toptables %>%
+  filter(regulation != "non-changing") %>% 
+  group_by(contrast, processing_type, regulation, nterm_modif) %>%
+  summarise(n = n()) 
+```
+
+```{r fig.height=4, fig.width=7}
+regulated_termini %>%
+  ggplot(aes(x = processing_type, 
+             fill = nterm_modif,
+             y = n)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), 
+            hjust = 1, 
+            size = 2.5,
+            position = "stack") +
+  facet_grid(contrast~regulation) +
+  scale_fill_manual(values = c("Acetyl" = "#E67F0D", 
+                               "Dimethyl" = "#22577A")) +
+  coord_flip() + 
+  theme_minimal() +
+  labs(x = "Processing Category", 
+       y = "Number of termini") +
+  theme(
+    strip.text.x = element_text(size = 10),
+    strip.text.y = element_text(size = 7),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    # add legend to the bottom
+    legend.position = "bottom"
+  ) 
+```
+
+```{r}
+regulated_termini %>%
+  kableExtra::kable() 
+```
+
+# Heatmaps of cleavage areas of differentially abundant termini
+
+## Oct1 vs WT 
+
+### Upregulated
+
+```{r}
+# Get the topTable for the contrasts
+sequences_of_cleavage_area_Oct1_vs_WT_up <- all_toptables %>%
+  filter(contrast == "Oct1_vs_WT",
+         regulation == "upregulated") %>%
+  mutate(cleavage_sequence_x = paste0(x_res_before, 
+                                      x_res_after)) %>%
+  dplyr::select(nterm_modif_peptide, cleavage_sequence_x) %>%
+  mutate(len_cleave = nchar(cleavage_sequence_x)) #%>%
+  #filter(len_cleave == 10)
+
+seq_cleav_area_Oct1_vs_WT_up <- sequences_of_cleavage_area_Oct1_vs_WT_up$cleavage_sequence_x
+```
+
+```{r}
+seq_cleav_area_seq_cleav_area_Oct1_vs_WT_up_counts <- cleavage_area_matrix(seq_cleav_area_Oct1_vs_WT_up, p_number = 10)
+```
+
+```{r}
+pheatmap(seq_cleav_area_seq_cleav_area_Oct1_vs_WT_up_counts$amino_acid_count, 
+        cluster_rows = FALSE,
+        cluster_cols = FALSE,
+        main = "AA Counts - Oct1 vs WT - Upregulated (incr in Oct1)",
+        color = colorRampPalette(brewer.pal(n = 9, name = "Reds"))(100))
+```
+
+### Downregulated
+
+```{r}
+# Get the topTable for the contrasts
+
+sequences_of_cleavage_area_Oct1_vs_WT_down <- all_toptables %>%
+  filter(contrast == "Oct1_vs_WT",
+         regulation == "downregulated") %>%
+  mutate(cleavage_sequence_x = paste0(x_res_before, 
+                                      x_res_after)) %>%
+  dplyr::select(nterm_modif_peptide, cleavage_sequence_x) %>%
+  mutate(len_cleave = nchar(cleavage_sequence_x)) #%>%
+  #filter(len_cleave == 10)
+
+seq_cleav_area_Oct1_vs_WT_down <- sequences_of_cleavage_area_Oct1_vs_WT_down$cleavage_sequence_x
+```
+
+```{r}
+seq_cleav_area_seq_cleav_area_Oct1_vs_WT_down_counts <- cleavage_area_matrix(seq_cleav_area_Oct1_vs_WT_down, p_number = 10)
+```
+
+```{r}
+pheatmap(seq_cleav_area_seq_cleav_area_Oct1_vs_WT_down_counts$amino_acid_count, 
+        cluster_rows = FALSE,
+        cluster_cols = FALSE,
+        main = "AA Counts - Oct1 vs WT - Downregulated (decr in Oct1)",
+        color = colorRampPalette(brewer.pal(n = 9, name = "Blues"))(100))
+```
+
+# Sequence logos of cleavage areas of differentially abundant termini
+
+The background model is built based on all the sequences of proteins identified in the experiment. The background set is composed of randomly selected subsequences from the identified proteome with each subsequence of the same length as input sequences. The sequences are then tested for differential abundance using the DAU test. The DAU test is a z-test that compares the observed frequency of amino acids at each position in the cleavage area to the expected frequency based on the background model. The test is performed for each position in the cleavage area, and the results are visualized as sequence logos.
+
+```{r}
+proteome <- prepareProteome(
+  fasta = here(fasta_location), 
+  species = "Saccharomyces cerevisiae")
+```
+
+## Oct1 vs WT
+
+### Upregulated 
+
+```{r}
+set.seed(404)
+
+seqs_upregulated_4ice <- formatSequence(
+  seq = seq_cleav_area_Oct1_vs_WT_up, 
+  proteome = proteome)
+
+seqs_upregulated_4ice_ztest <- buildBackgroundModel(
+  seqs_upregulated_4ice, 
+  model = "any",
+  background = "wholeProteome",
+  proteome = proteome, 
+  testType = "ztest")
+
+seqs_upregulated_4ice_ztest_dau <- testDAU(
+  seqs_upregulated_4ice, 
+  dagBackground = seqs_upregulated_4ice_ztest)
+```
+
+```{r warning=FALSE}
+dagLogo(seqs_upregulated_4ice_ztest_dau,
+        labels = c(
+          "P10", "P9", "P8", "P7", "P6",
+          "P5","P4", "P3", "P2", "P1", 
+          "P1'", "P2'", "P3'", "P4'", "P5'",
+          "P6'", "P7'", "P8'", "P9'", "P10'")) 
+```
+
+### Downregulated
+
+```{r}
+set.seed(404)
+
+seqs_downregulated_4ice <- formatSequence(
+  seq = seq_cleav_area_Oct1_vs_WT_down, 
+  proteome = proteome)
+
+seqs_downregulated_4ice_ztest <- buildBackgroundModel(
+  seqs_downregulated_4ice, 
+  model = "any",
+  background = "wholeProteome",
+  proteome = proteome, 
+  testType = "ztest")
+
+seqs_downregulated_4ice_ztest_dau <- testDAU(
+  seqs_downregulated_4ice, 
+  dagBackground = seqs_downregulated_4ice_ztest)
+```
+
+```{r warning=FALSE}
+dagLogo(seqs_downregulated_4ice_ztest_dau,
+        labels = c(
+          "P10", "P9", "P8", "P7", "P6",
+          "P5","P4", "P3", "P2", "P1", 
+          "P1'", "P2'", "P3'", "P4'", "P5'",
+          "P6'", "P7'", "P8'", "P9'", "P10'"))
+```
+
+# Functional annotation of 'substrates'
+
+Prepare data frame 
+
+```{r}
+df_cluster_profiler <- all_toptables %>%
+  dplyr::select(
+    nterm_modif_peptide, 
+    gene, 
+    logFC, 
+    adj.P.Val, 
+    `-log10_adj.P.Val`,
+    contrast, 
+    regulation,
+    label,
+    processing_type) %>%
+  filter(regulation != "non-changing") %>%
+  left_join(., prot2gene) 
+```
+
+## GO: Molecular function
+
+```{r}
+# do if statement to check if results are in r_project_files/rds
+
+if (!file.exists(here("r_project_files/rds/GO_molecular_function_trypsin.rds"))) {
+  
+  # run the enrichment analysis
+  go_mf <- compareCluster(protein ~ contrast + regulation, 
+                 data = df_cluster_profiler, 
+                 fun = "enrichGO",
+                 keyType = "UNIPROT",
+                 OrgDb    = org.Sc.sgd.db,
+                 ont      = "MF",
+                 universe = prot2gene$protein,
+                 readable = FALSE)
+  
+  go_mf <- simplify(go_mf)
+  
+  # save the results
+  saveRDS(go_mf, here("r_project_files/rds/GO_molecular_function_trypsin.rds"))
+  
+} else {
+  
+  # load the results
+  go_mf <- readRDS(here("r_project_files/rds/GO_molecular_function_trypsin.rds"))
+  
+}
+```
+
+```{r fig.height=5.5, fig.width=6}
+clusterProfiler::dotplot(go_mf, x = "regulation") + 
+  facet_grid(~ contrast) +
+  labs(
+    title = "GO: Molecular Function",
+    caption = "Interpretation example: in Oct1 vs WT, downregulated means decreased in Oct1 and increased in WT") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+## GO: Cellular component
+
+```{r}
+# do if statement to check if results are in r_project_files/rds
+
+if (!file.exists(here("r_project_files/rds/GO_cellular_component_trypsin.rds"))) {
+  
+  # run the enrichment analysis
+  go_cc <- compareCluster(protein ~ contrast + regulation, 
+                 data = df_cluster_profiler, 
+                 fun = "enrichGO",
+                 keyType = "UNIPROT",
+                 OrgDb    = org.Sc.sgd.db,
+                 ont      = "CC",
+                 universe = prot2gene$protein,
+                 readable = FALSE)
+  
+  go_cc <- simplify(go_cc)
+  
+  # save the results
+  saveRDS(go_cc, here("r_project_files/rds/GO_cellular_component_trypsin.rds"))
+  
+} else {
+  
+  # load the results
+  go_cc <- readRDS(here("r_project_files/rds/GO_cellular_component_trypsin.rds"))
+  
+}
+```
+
+```{r fig.height=5.5, fig.width=6}
+clusterProfiler::dotplot(go_cc, 
+                         x = "regulation") + 
+  facet_grid(~ contrast) +
+  labs(
+    title = "GO: Cellular Component",
+    caption = "Interpretation example: in Oct1 vs WT, downregulated means decreased in Oct1 and increased in WT") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+## GO: Biological process
+
+```{r}
+# do if statement to check if results are in rds
+
+if (!file.exists(here("r_project_files/rds/GO_biological_process_trypsin.rds"))) {
+  
+  # run the enrichment analysis
+  go_bp <- compareCluster(protein ~ contrast + regulation, 
+                 data = df_cluster_profiler, 
+                 fun = "enrichGO",
+                 keyType = "UNIPROT",
+                 OrgDb    = org.Sc.sgd.db,
+                 ont      = "BP",
+                 universe = prot2gene$protein,
+                 readable = FALSE)
+  
+  go_bp <- simplify(go_bp)
+  
+  # save the results
+  saveRDS(go_bp, here("r_project_files/rds/GO_biological_process_trypsin.rds"))
+  
+} else {
+  
+  # load the results
+  go_bp <- readRDS(here("r_project_files/rds/GO_biological_process_trypsin.rds"))
+  
+}
+```
+
+```{r fig.height=5.5, fig.width=6}
+clusterProfiler::dotplot(go_bp, x = "regulation") + 
+  facet_grid(~ contrast) +
+  labs(
+    title = "GO: Biological Process",
+    caption = "Interpretation example: in Oct1 vs WT, downregulated means decreased in Oct1 and increased in WT") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+# Visualization of top cleavage sites 
+
+## Lollipop plots of fold-changes by contrast and regulation 'direction'
+
+```{r}
+# get the top 25 cleavage sites by contrast and regulation 'direction'
+
+top_25_cleavage_sites <- df_cluster_profiler %>%
+  # arrange by absolute logFC and largest -log10(adj.P.Val)
+  group_by(contrast, regulation) %>%
+  arrange(desc(abs(logFC)), desc(`-log10_adj.P.Val`)) %>%
+  slice_head(n = 25) %>%
+  arrange(desc(`-log10_adj.P.Val`))
+```
+
+```{r fig.width=11.4, fig.height=14}
+# do horizontal lollipop plot in which the length of the line is logFC
+# the size of the ball is -log10_adj.P.Val and color is processing type
+
+top_25_cleavage_sites %>%
+  ggplot(
+    aes(
+      x = label, 
+      y = abs(logFC))) +
+  geom_segment(
+    aes(
+      x=label, 
+      xend=label, 
+      y=0, 
+      yend=abs(logFC)), 
+    color="skyblue") +
+  geom_point(
+    aes(
+      size =`-log10_adj.P.Val`, 
+      color = processing_type,
+    )) +
+  # define colors scale manually
+  scale_color_manual(values = c(
+    "MTS" = "#757780",
+    "SP" = "#FFAD69", 
+    "PROPEP" = "#1E3888", 
+    "TRANSIT" = "#00B339", 
+    "P2" = "#9C3848",
+    "P1" = "#484538", 
+    "not_canonical" = "#8E6E53")) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  facet_wrap(~contrast~regulation, ncol = 1, scales = "free") + 
+  labs(
+    title = "Top 25 cleavage sites by contrast and regulation 'direction'",
+    x = "Cleavage site",
+    y = "Log Fold Change (logFC)",
+    size = "-log10(adj.P.Val)",
+    color = "Processing type",
+    caption = "Interpretation example: in Oct1 vs WT, upregulated means increased in Oct1 and decreased in WT"
+  ) +
+  # Custom guide for color with sizes in the legend
+  guides(
+    color = guide_legend(
+      override.aes = list(size = rep(4, 
+                                     length(unique(top_25_cleavage_sites$processing_type))))  # Manually set dot sizes in the color legend
+    )
+  )
+
+```
+
+## Heatmaps of top 30 features by adjusted P-value per contrast
+
+```{r}
+# get the top 30 cleavage sites by contrast and regulation 'direction'
+
+top_30_cleavage_sites_contr <- df_cluster_profiler %>%
+  dplyr::select(-protein) %>%
+  # arrange by absolute logFC and largest -log10(adj.P.Val)
+  group_by(contrast) %>%
+  arrange(desc(abs(logFC)), desc(`-log10_adj.P.Val`)) %>%
+  slice_head(n = 30) %>%
+  ungroup() %>%
+  left_join(.,
+            quant_peptide_data) %>%
+  distinct()
+```
+
+### Oct1 vs WT
+
+```{r fig.height=6.5, fig.width=8}
+# get the top 30 features by adjusted P-value
+
+top_30_cleavage_sites_contr_mat <- top_30_cleavage_sites_contr %>%
+  filter(contrast == "Oct1_vs_WT") %>%
+  dplyr::select(label, experimental_design$sample) %>%
+  # sum up rows with the same label
+  column_to_rownames("label") %>%
+  as.matrix()
+
+top_30_cleavage_sites_row_annot <- top_30_cleavage_sites_contr %>%
+  filter(contrast == "Oct1_vs_WT") %>%
+  dplyr::select(gene, label, regulation, nterm_modif_peptide, processing_type) 
+
+min_val <- min(top_30_cleavage_sites_contr_mat, na.rm = TRUE)
+max_val <- max(top_30_cleavage_sites_contr_mat, na.rm = TRUE)
+
+row_annotattion = rowAnnotation(
+  regulation = top_30_cleavage_sites_row_annot$regulation,
+  processing_type = top_30_cleavage_sites_row_annot$processing_type,
+  col = list(regulation = c("upregulated" = "red", 
+                            "downregulated" = "blue"),
+             processing_type = c(
+    "MTS" = "#757780",
+    "SP" = "#FFAD69", 
+    "PROPEP" = "#1E3888", 
+    "TRANSIT" = "#00B339", 
+    "P2" = "#9C3848",
+    "P1" = "#484538", 
+    "not_canonical" = "#8E6E53")))
+
+ht <- Heatmap(top_30_cleavage_sites_contr_mat, 
+        name = "Abundance", 
+        na_col = "black",
+        rect_gp = gpar(col = "white", lwd = 2),
+       # row_title = "Top 30 features by adjusted P-value from KO1 vs WT",
+        column_split = experimental_design$condition,
+        row_split = top_30_cleavage_sites_row_annot$regulation,
+        left_annotation = row_annotattion,
+        cluster_rows = FALSE, 
+        cluster_columns = FALSE,
+        row_names_gp = gpar(fontsize = 7),
+        column_names_gp = gpar(fontsize = 7),
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 10),
+                                    direction = "horizontal"),
+        col = colorRamp2(
+          c(min(min_val, na.rm = TRUE), 
+            max(max_val, na.rm = TRUE)), 
+          c("white", "red")))
+
+# Draw heatmap with legend at the bottom
+draw(ht, heatmap_legend_side = "bottom",
+     padding = unit(c(0, 0, 0, 4), "cm"))
+```
+
+# Comments 
+
+# Save tabular results 
+
+## Differential abundance analysis results
+
+```{r}
+#build the path to the file with the pre_fix
+file_name <- paste0("r_project_files/results/",pre_fix, "_limma_results_all_contrasts.tsv")
+
+# if file doesn't exist, write it
+if (!file.exists(here(file_name))) {
+  
+   
+  write_tsv(
+    all_toptables,
+    here(file_name)
+  )
+  
+}
+```
+
+```{r}
+simplified_hunter_results <- all_toptables %>%
+  dplyr::select(
+    contrast_hunter = contrast,
+    gene_nterm_modif_peptide_cleavage_site = label,
+    nterm_modif_peptide,
+    nterm_modif,
+    peptide,
+    protein,
+    gene, 
+    five_residues_before = five_res_before,
+    five_residues_after = five_res_after,
+    ten_residues_before = x_res_before,
+    ten_residues_after = x_res_after,
+    cleavage_site,
+    cleavage_sequence,
+    cleavage_sequence_10 = cleavage_sequence_x,
+    hunter_limma_logFC = logFC,
+    hunter_limma_adj_p_val = adj.P.Val,
+    hunter_limma_p_val = P.Value,
+    hunter_limma_regulation = regulation,
+    peptide_protease_specificity = specificity,
+    first_aa_residue = first_aa,
+    preceding_aa_residue = aa_before,
+    last_aa_residue = last_aa,
+    preceding_aa_position = p1_position,
+    first_aa_position = p1_prime_position,
+    preceding_aa_position_relative = p1_position_percentage,
+    matching_uniprot_processing_type = uniprot_processing_type,
+    matching_targetp_processing_type = processing_type_targetp,
+    processing_type_terminer,
+    processing_type_consolidated = processing_type,
+    source_processing_type_consolidated = source_processing_annotation,
+  )
+```
+
+```{r}
+#build the path to the file with the pre_fix
+file_name2 <- paste0("r_project_files/results/",pre_fix, "_limma_results_all_contrasts_simplified.tsv")
+
+# if file doesn't exist, write it
+if (!file.exists(here(file_name2))) {
+  
+   
+  write_tsv(
+    simplified_hunter_results,
+    here(file_name2)
+  )
+  
+}
+```
+
+## Summary of missingness and imputation approach
+
+```{r}
+#build the path to the file with the pre_fix
+
+file_name3 <- paste0("r_project_files/results/",pre_fix, "_imputation_summary_table.tsv")
+
+# if file doesn't exist, write it
+if (!file.exists(here(file_name3))) {
+  
+   
+  write_tsv(
+    imputation_summary_table,
+    here(file_name3)
+  )
+  
+}
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+

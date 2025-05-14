@@ -1,0 +1,16 @@
+sample	sample_name	condition	bio_replicate	run
+EX003112_converted	KO1_1	KO1	1	EX003112_converted
+EX003113_converted	KO1_2	KO1	1	EX003113_converted
+EX003114_converted	KO1_3	KO1	1	EX003114_converted
+EX003115_converted	KO1_4	KO1	1	EX003115_converted
+EX003116_converted	KO1_5	KO1	1	EX003116_converted
+EX003106_converted	KO2_1	KO2	1	EX003106_converted
+EX003107_converted	KO2_2	KO2	1	EX003107_converted
+EX003108_converted	KO2_3	KO2	1	EX003108_converted
+EX003109_converted	KO2_4	KO2	1	EX003109_converted
+EX003110_converted	KO2_5	KO2	1	EX003110_converted
+EX003118_converted	WT_1	WT	1	EX003118_converted
+EX003119_converted	WT_2	WT	1	EX003119_converted
+EX003120_converted	WT_3	WT	1	EX003120_converted
+EX003121_converted	WT_4	WT	1	EX003121_converted
+EX003122_converted	WT_5	WT	1	EX003122_converted

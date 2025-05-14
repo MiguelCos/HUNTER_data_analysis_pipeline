@@ -1,0 +1,990 @@
+---
+title: "Exploratory analysis v3 | "
+author: "Miguel Cosenza-Contreras"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    embed-resources: true
+editor: source
+execute:
+  eval: true
+  echo: false
+  error: false
+  warning: false
+  message: false
+---
+
+# Required R packages
+
+Install required packages:
+
+```{r}
+bioconductor <- c(
+  "limma",
+  "clusterProfiler",
+  "SummarizedExperiment",
+  "ComplexHeatmap",
+  "dagLogo"
+)
+
+cran_pack <- c(
+  "here",
+  "janitor",
+  "seqinr",
+  "ggpubr",
+  "ggrepel",
+  "pheatmap",
+  "RColorBrewer",
+  "rrcovNA"
+)
+```
+
+```{r}
+# check and install CRAN packages
+
+for (package in cran_pack) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+  }
+}
+
+# check and install bioconductor packages
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+for (package in bioconductor) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    BiocManager::install(package)
+  }
+}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("mixOmics")
+```
+
+__TermineR installation and/or loading__
+
+```{r}
+if (!require("TermineR", quietly = TRUE)){        
+    devtools::install_github("MiguelCos/TermineR")
+}
+
+if (!require("diann", quietly = TRUE)){        
+    devtools::install_github("vdemichev/diann-rpackage")
+}
+```
+
+__Required R packages__
+
+```{r load_packages, warning=FALSE, message=FALSE}
+## Required packages ----
+library(TermineR)
+
+library(tidyverse)
+library(limma)
+library(clusterProfiler)
+library(org.Hs.eg.db) # change depending on organism -- check https://bioconductor.org/packages/3.20/data/annotation/ --- Human is org.Hs.eg.db
+library(here)
+library(janitor)
+library(seqinr)
+library(ggrepel)
+library(SummarizedExperiment)
+library(pheatmap)
+library(RColorBrewer)
+library(rrcovNA)
+library(naniar)
+library(mixOmics)
+library(kableExtra)
+```
+
+# Define comparisons and parameters
+
+## Location of DIA-NN `report.tsv`
+
+```{r}
+diann_report_location <- here("//meridian.cyanolab.biologie.privat/huesgen_share/0_people/Heinrich/Colaborations/Babesia/February2025/preHUNTER_Exploris/FP/diann-output/report.tsv")
+```
+
+## Location of annotation file
+
+```{r}
+location_annotation <- here("//meridian.cyanolab.biologie.privat/huesgen_share/0_people/Heinrich/Colaborations/Babesia/February2025/preHUNTER_Exploris/Babesia_2025_preHUNTER_sample_metadata_annotation.tsv")
+```
+
+## Location of fasta file
+
+```{r}
+fasta_location <- here("//meridian.cyanolab.biologie.privat/huesgen_share/0_people/Heinrich/Colaborations/Babesia/Babesia_BosTauros.fasta")
+```
+
+## Define parameters of HUNTER experiment
+
+Define 'sense' of experimental protease. "C" cuts at carboxilic side (i.e., trypsin), "N" at aminic side. 
+
+```{r}
+# sense 
+sense_protease <- "C" 
+```
+
+Define 'specificity' of the protease. Example: `"K|R"` for trypsin (cuts at K or R).
+
+```{r}
+specificity_protease <- "K|R"
+```
+
+Define 'organism' of the proteome. "human_iso" for human isoforms. Run `r help(annotate_neo_termini)` to see available organisms.
+
+```{r}
+organism_annotation <- "human_iso"
+```
+
+## Exploris or QE?
+
+```{r}
+# modify this. options "EX" or "QE"
+
+instrument <- "EX" # or "QE"
+```
+
+```{r}
+# don't modify this! just execute
+instrument <- if (instrument == "EX") {
+  "EX0"
+} else if (instrument == "QE"){
+  "QE0"
+} else {
+  stop("Instrument definition not recognized")
+}
+```
+
+## Acceptable missingness 
+
+Defining acceptable missingness based on the number of replicates per condition. 
+
+Example: `1 / 4` would mean that a feature can be missing in up to 1 out of 4 replicates per condition. If it is missing in more than 1 replicate, it would be considered as 'completeley missing' in one condition.
+
+```{r echo=TRUE}
+missing_accepted <- 2 / 5
+```
+
+### Min. probability imputation sampling parameters
+
+Recommended to be left as is (`tune_sigma <- 1` and `tune_quantile = 0.01`. Sigma values `< 1` would produce a 'sharper' distribution of minimal values to sample from. It will represent a fraction of the variance of the general distribution of abundances. `tune_quantile` would define the minimal from the general abundance distribution. `0.01` would define the minimal value as the 1% quantile of all abundances.
+
+```{r echo=TRUE}
+# parameters for min probability distribution sampling for 'complete missing' features
+tune_sigma <- 1
+tune_quantile <- 0.0000001
+```
+
+# Load required data
+
+## Load the peptide-level quantitation data (`diann_adapter`)
+
+```{r}
+df_from_diann <- diann_adapter(diann_report_location)
+```
+
+```{r}
+df_raw_diann <- diann_load(diann_report_location)
+
+df_raw_diann <- diann_matrix(
+  df_raw_diann,
+  id.header = "Precursor.Id",
+  quantity.header = "Precursor.Quantity"
+)
+
+colnames(df_raw_diann) <- str_remove(
+    colnames(df_raw_diann),
+    ".*\\\\") %>%
+    str_remove(
+      "\\..*")
+
+df_raw_diann <- df_raw_diann %>%
+    as.data.frame() %>%
+    rownames_to_column("precursor_id")
+
+df_raw_diann <- df_raw_diann[, -8]
+
+```
+
+## Load sample annotation data
+
+```{r echo=TRUE}
+# load data
+sample_annotation <- read_delim(
+  location_annotation
+  ) 
+```
+
+```{r}
+experimental_design <- sample_annotation %>% 
+                    filter(condition != "empty") %>%
+                    mutate(replicate = bio_replicate)
+```
+
+## Load and prepare protein annotation data
+
+```{r}
+report_tsv <- read_tsv(diann_report_location) %>%
+  janitor::clean_names()
+
+prot2gene <- report_tsv %>%
+  dplyr::select(protein = protein_ids,
+                gene = genes) %>%
+  distinct()
+
+rm(report_tsv)
+```
+
+# Annotation of peptide specificities
+
+```{r}
+annotated_df_quant <- annotate_neo_termini(
+  peptides_df = df_from_diann, 
+  fasta_location = fasta_location,
+  sense = sense_protease, 
+  specificity = specificity_protease,
+  organism = organism_annotation) %>% 
+  mutate(cleav_len = nchar(cleavage_sequence)) %>% 
+  relocate(cleav_len, .after = cleavage_sequence)
+```
+
+```{r}
+# get peptide annotation
+nterannot <- annotated_df_quant %>%
+  dplyr::select(nterm_modif_peptide:protein_sequence)
+```
+
+# Number of identifications peptide feature 
+
+```{r}
+# calculate number of identifications per sample
+tabular_nr_of_ids_per_sample <- annotated_df_quant %>%
+  dplyr::select(starts_with(instrument)) %>%
+  # pivot_longer to get the data in a long format
+  tidyr::pivot_longer(cols = starts_with(instrument),
+                      names_to = "sample",
+                      values_to = "value") %>%
+  group_by(sample) %>%
+  summarise(
+    n_ids_per_sample = sum(!is.na(value))
+  ) 
+
+# calculate number of identifications per sample and modification
+tabular_nr_of_ids_per_sample_modif <- annotated_df_quant %>%
+  dplyr::select(nterm_modif, starts_with(instrument)) %>%
+  # pivot_longer to get the data in a long format
+  tidyr::pivot_longer(cols = starts_with(instrument),
+                      names_to = "sample",
+                      values_to = "value") %>%
+  group_by(nterm_modif, sample) %>%
+  summarise(
+    n_ids_per_sample_n_modif = sum(!is.na(value))
+  )
+```
+
+## Nr of IDs by 'amino acid before' (P1)
+
+```{r}
+tabular_nr_of_ids_per_aa_before <- annotated_df_quant %>%
+  dplyr::select(nterm_modif_peptide, nterm_modif, p1_residue, starts_with(instrument)) %>%
+  # pivot_longer to get the data in a long format
+  tidyr::pivot_longer(cols = starts_with(instrument),
+                      names_to = "sample",
+                      values_to = "value") %>%
+  group_by(nterm_modif, p1_residue, sample) %>%
+  summarise(
+    n_identifications = sum(!is.na(value))
+  ) %>%
+  ungroup() %>%
+  left_join(., tabular_nr_of_ids_per_sample) %>%
+  left_join(., tabular_nr_of_ids_per_sample_modif) %>%
+  mutate(
+    percentage_of_ids_per_sample = n_identifications / n_ids_per_sample * 100,
+    percentage_of_ids_per_sample_n_modif = n_identifications / n_ids_per_sample_n_modif * 100
+  ) 
+```
+
+```{r fig.height=7.5, fig.width=8.5}
+tabular_nr_of_ids_per_aa_before %>% 
+ggplot(aes(x = sample,
+             y = n_identifications,
+             fill = p1_residue)) +
+  facet_wrap(.~nterm_modif, ncol = 2) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = "Sample",
+    y = "Number of identifications\n(N-term modif + peptide)",
+    title = "Nr of IDs per N-terminal modication and previous amino acid",
+    fill = "Preceding residue",
+  ) +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+```
+
+```{r  fig.height=7.5, fig.width=8.5}
+tabular_nr_of_ids_per_aa_before %>% 
+ggplot(aes(x = sample,
+             y = percentage_of_ids_per_sample_n_modif,
+             fill = p1_residue)) +
+  facet_wrap(.~nterm_modif, ncol = 2) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = "Sample",
+    y = "% of total identifications per sample\n(N-term modif + peptide)",
+    title = "Proportion of IDs per N-terminal modication and preceding amino acid ",
+    caption = "Number on the plot represent % of R residues at preceding amino acid in the sample",
+    fill = "Preceding residue"
+  ) +
+  # add a text label on top only of the R residues
+  geom_text(
+    data = . %>% filter(p1_residue == "R"),
+    aes(label = round(percentage_of_ids_per_sample_n_modif, 2)),
+    #position = position_stack(vjust = 0.5),
+    size = 3
+  ) +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1)
+  )
+```
+
+# Number of identifications per sample
+
+```{r}
+df_from_diann %>%
+  dplyr::select(starts_with(instrument)) %>%
+  # pivot_longer to get the data in a long format
+  tidyr::pivot_longer(cols = everything(),
+                      names_to = "sample",
+                      values_to = "value") %>%
+  group_by(sample) %>%
+  summarise(
+    n_identifications = sum(!is.na(value))
+  ) %>%
+  ggplot(aes(x = sample,
+             y = n_identifications)) +
+  geom_col() +
+  # add number inside the bars
+  geom_text(aes(label = n_identifications),
+            vjust = 0,
+            hjust = 6) +
+  labs(
+    x = "Sample",
+    y = "Number of identifications\n(N-term modif + peptide)"
+  ) +
+  coord_flip() +
+  theme_minimal()
+```
+
+# Distribution of abundances 
+
+```{r}
+df_from_diann %>%
+  dplyr::select(starts_with(instrument)) %>%
+  # pivot_longer to get the data in a long format
+  tidyr::pivot_longer(cols = everything(),
+                      names_to = "sample",
+                      values_to = "value") %>%
+  left_join(., sample_annotation) %>%
+  ggplot(aes(x = sample,
+             y = value,
+             fill = condition)) +
+  geom_boxplot() +
+  labs(
+    x = "Abundance",
+    y = "Density"
+  ) +
+  theme_minimal() + 
+  theme(
+    # 
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+```
+
+```{r}
+# do the same as above but with a selection of 15 features
+set.seed(101)
+
+df_from_diann %>%
+  dplyr::select(nterm_modif_peptide, starts_with(instrument)) %>%
+  # pivot_longer to get the data in a long format
+  tidyr::pivot_longer(cols = starts_with(instrument),
+                      names_to = "sample",
+                      values_to = "value") %>%
+  left_join(., sample_annotation) %>%
+  filter(nterm_modif_peptide %in% sample(annotated_df_quant$nterm_modif_peptide, 15)) %>%
+  ggplot(aes(x = reorder(nterm_modif_peptide, value),
+             y = value)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    x = "Nterm modif + peptide",
+    y = "Abundance",
+    title = "Distribution of abundances for 15 peptides"
+  ) +
+  facet_wrap(~ condition, scales = "free") + 
+  theme_minimal() + 
+  theme(
+    # 
+    axis.text.x = element_blank()
+  )
+```
+
+# Checking distribution of missing values
+
+```{r}
+quant_info_min <- df_from_diann %>%
+  dplyr::select(
+    nterm_modif_peptide,
+    starts_with(instrument)
+  ) %>%
+  # generate new column counting nr of nas per row
+  mutate(na_count = rowSums(is.na(.)),
+         n_total = (ncol(.)-1)) %>%
+  mutate(na_fraction = na_count / n_total) %>%
+  rowwise() %>%
+  mutate(
+    median_peptide_abund = median(c_across(starts_with(instrument)), na.rm = TRUE)
+  )
+  
+missing_value_info <- quant_info_min %>%
+  dplyr::select(
+    nterm_modif_peptide,
+    na_count,
+    na_fraction,
+    median_peptide_abund
+  ) %>%
+  left_join(., nterannot) 
+```
+
+```{r}
+# count number of missing values per column in df_raw_diann
+# and calculate: median abundance, mean abundance and sum of abundance per column in df_raw_diann
+
+missing_value_info_sample <- df_raw_diann %>%
+  dplyr::select(
+    precursor_id,
+    starts_with(instrument)
+  ) %>%
+  pivot_longer(
+    cols = starts_with(instrument),
+    names_to = "sample",
+    values_to = "abundance"
+  ) %>%
+  # group by sample, calculate nr of missing values, % of missing values
+  # sum of abundance, mean of abundance and median of abundance
+  group_by(sample) %>%
+  summarise(
+    n_missing = sum(is.na(abundance)),
+    n_total = n(),
+    na_fraction = n_missing / n_total,
+    sum_abundance = sum(abundance, na.rm = TRUE),
+    mean_abundance = mean(abundance, na.rm = TRUE),
+    median_abundance = median(abundance, na.rm = TRUE)
+  ) %>%
+  left_join(., sample_annotation) %>%
+  ungroup()
+```
+
+## Are there more missing values per certain modifications?
+
+```{r}
+missing_value_info %>%
+  ggplot(aes(x = na_count)) +
+  geom_bar() +
+  facet_wrap(~ nterm_modif) +
+  ggtitle(label = "Distribution of missing values per by feature and modification") + 
+  theme_minimal()
+```
+
+```{r}
+missing_value_info %>%
+  ggplot(aes(x = nterm_modif,
+             y = na_count,
+             fill = specificity)) +
+  geom_col() +
+  labs(
+    color = "Specificity"
+  ) + 
+  theme_minimal()
+```
+
+```{r fig.height=7.5, fig.width=8.5}
+missing_value_info %>%
+  ggplot(aes(x = nterm_modif,
+             y = na_fraction,
+             fill = specificity)) +
+  geom_boxplot(
+    position = "dodge2"
+  ) + 
+  geom_jitter(
+    position = position_jitterdodge(jitter.width = 0.25),
+    alpha = 0.5,
+    size = 0.8
+  ) +
+  facet_wrap(~ uniprot_processing_type) +
+  labs(
+    color = "Specificity"
+  ) + 
+  labs(
+    title = "Fraction of missingness by modification and specificity"
+  ) + 
+  theme_minimal() + 
+  theme(
+    # tilt x-axis labels 45 degrees
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    # put legend at the bottom
+    legend.position = "bottom"
+  )
+```
+
+```{r fig.height=4.5, fig.width=6}
+missing_value_info %>%
+  ggplot(aes(x = nterm_modif,
+             y = na_fraction,
+             fill = specificity)) +
+  geom_boxplot(
+    position = "dodge2"
+  ) + 
+  geom_jitter(
+    position = position_jitterdodge(jitter.width = 0.25),
+    alpha = 0.5,
+    size = 0.8
+  ) +
+  labs(
+    color = "Specificity"
+  ) + 
+  labs(
+    title = "Fraction of missingness by modification and specificity"
+  ) + 
+  theme_minimal() + 
+  theme(
+    # tilt x-axis labels 45 degrees
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    # put legend at the bottom
+    legend.position = "bottom"
+  )
+```
+
+## General missing value distribution  
+
+```{r}
+naniar::vis_miss(df_from_diann %>% dplyr::select(starts_with(instrument)),
+  cluster = FALSE,
+  sort_miss = TRUE) + 
+  theme(
+    # x-axis labels 90 degrees
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+```
+
+## Association between missing values and abundance
+
+### Per sample
+
+```{r}
+missing_value_info_sample %>%
+  ggplot(aes(x = median_abundance,
+             y = na_fraction)) +
+  geom_point() +
+  # add linear fitting
+  geom_smooth(method = "lm") +
+  labs(
+    x = "Median abundance",
+    y = "Fraction of missing values",
+    title = "% missing values vs median raw abundance per sample"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# % of missing values per sum of abundances
+missing_value_info_sample %>%
+  ggplot(aes(x = sum_abundance,
+             y = na_fraction)) +
+  geom_point() +
+  # add linear fitting
+  geom_smooth(method = "lm") +
+  labs(
+    x = "Sum of abundance",
+    y = "Fraction of missing values",
+    title = "% missing values vs sum of raw abundance per sample"
+  ) +
+  theme_minimal()
+```
+
+A negative association of proportion/count of missing values with precursor abundance per sample suggests that missingness tends to be associated with features being below the limit of detection. 
+
+# Handling of missing values
+
+```{r}
+# get peptide quantitation
+quant_peptide_data <- annotated_df_quant %>%
+  dplyr::select(nterm_modif_peptide, all_of(experimental_design$sample)) 
+```
+
+## Characterization of missingness and exclusion of sparse features
+
+```{r}
+# Step 1: Pivot the data to a long format
+quant_peptide_data_long <- quant_peptide_data %>%
+  pivot_longer(
+    cols = -nterm_modif_peptide,
+    names_to = "sample",
+    values_to = "Abundance"
+  ) %>%
+  left_join(., experimental_design) %>%
+  separate(
+    col = sample_name,
+    into = c("Condition", "Replicate"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  dplyr::select(
+    -Condition
+  )
+
+# Step 2: Calculate missingness per peptide per condition
+
+# Determine the total number of replicates per condition
+Total_Replicates <- quant_peptide_data_long %>%
+  group_by(condition) %>%
+  summarise(Total_Replicates = n_distinct(Replicate)) %>%
+  ungroup()
+
+peptide_missingness <- quant_peptide_data_long %>%
+  group_by(nterm_modif_peptide, condition) %>%
+  summarise(
+    Num_Quantified_per_cond = sum(!is.na(Abundance)),
+    Num_Missing_per_cond = sum(is.na(Abundance)),
+    .groups = 'drop'
+  ) %>%
+  left_join(Total_Replicates, by = "condition") %>%
+  mutate(
+    Proportion_Missing = Num_Missing_per_cond / Total_Replicates,
+    Missingness_Category = case_when(
+      Proportion_Missing <= 1 & Proportion_Missing > missing_accepted ~ "Total_Missing",
+      Proportion_Missing > 0 & Proportion_Missing <= missing_accepted ~ "Partial_Missing",
+      Proportion_Missing == 0 ~ "Complete"
+    )
+  ) %>%
+  ungroup() 
+
+# check for features that are consistently below threshold in all samples
+
+peptide_missingness_all <- peptide_missingness %>%
+  group_by(nterm_modif_peptide) %>%
+  summarize(
+    all_conditions_missing = all(Proportion_Missing > missing_accepted),
+    .groups = 'drop'
+  )
+
+peptide_missingness <- left_join(x = peptide_missingness,
+                                 y = peptide_missingness_all,
+                                 by = "nterm_modif_peptide")
+
+sparse_features <- peptide_missingness %>% 
+  filter(all_conditions_missing == TRUE) %>%
+  pull(nterm_modif_peptide) %>%
+  unique()
+
+# Step 3: Filter out sparce features and merge missingness info back to the main data frame
+quant_peptide_data_long <- quant_peptide_data_long %>% 
+  filter(!nterm_modif_peptide %in% sparse_features) %>%
+  left_join(peptide_missingness)
+```
+
+## Missing value imputation 
+
+```{r}
+# Step 4: Impute based on missingness category
+
+# Step 4.1: Impute "Total missing" peptides by minimum probability distribution
+
+## Define gaussian distribution based on min values to sample from
+set.seed(101)
+
+n_features <- length(unique(quant_peptide_data_long$nterm_modif_peptide))
+
+# calculate missingness of features overall
+peptide_missingness_overall <- quant_peptide_data_long %>%
+  group_by(nterm_modif_peptide) %>%
+  summarise(
+    Num_Quantified_overall = sum(!is.na(Abundance)),
+    Num_Missing_overall = sum(is.na(Abundance)),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Proportion_Missing_overall = Num_Quantified_overall / n_features
+  ) %>%
+  ungroup()
+
+# get list of features present in at least 50% of the samples
+features_in_more_50perc <- peptide_missingness_overall %>%
+  filter(Proportion_Missing_overall <= 0.5) %>%
+  pull(nterm_modif_peptide)
+
+# calculate protein-wise SD on features present in 50% or more samples
+protein_wise_sd <- quant_peptide_data_long %>%
+  filter(nterm_modif_peptide %in% features_in_more_50perc) %>%
+  group_by(nterm_modif_peptide) %>%
+  summarise(
+    sd = sd(Abundance, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+sd_median <- median(protein_wise_sd$sd, na.rm = TRUE) * tune_sigma
+
+# calculate min quantile value per sample for minimal value distribution 
+min_quantile_sample <- quant_peptide_data_long %>% 
+  group_by(sample_name) %>%
+  summarise(
+    min_per_sample = quantile(Abundance, prob = tune_quantile, na.rm = TRUE)
+  ) 
+
+# function for random sampling from minimal value distribution 
+sample_gausssian <- function(x){
+  
+  sample(
+    rnorm(n_features, mean = x, sd = sd_median),
+    1
+  )
+  
+}
+
+# merge min quantile values per sample 
+quant_peptide_data_long2 <- quant_peptide_data_long %>%
+  left_join(min_quantile_sample) %>%
+  rowwise() %>%
+  mutate(
+    abundance_imputed = ifelse(
+      is.na(Abundance) & Missingness_Category == "Total_Missing",
+      yes = sample_gausssian(min_per_sample),
+      no = Abundance
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    imputation_method = case_when(
+      is.na(Abundance) & Missingness_Category == "Total_Missing" ~ "minProb_dist",
+      is.na(Abundance) & Missingness_Category == "Partial_Missing" ~ "impSeqRob",
+      Missingness_Category == "Complete" ~ "not_imputed",
+      !is.na(Abundance) ~ "not_imputed"
+    )
+  )
+
+# Step 4.2: Impute "Partial missing" peptides
+
+# Pivot to wide format
+df_example_partial_missing_wide <- quant_peptide_data_long2 %>%
+  dplyr::select(nterm_modif_peptide, sample, abundance_imputed) %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = abundance_imputed
+  )
+
+# transform into matrix
+mat_example_partial_missing_wide <- df_example_partial_missing_wide %>%
+  dplyr::select(nterm_modif_peptide, starts_with(instrument)) %>%
+  column_to_rownames("nterm_modif_peptide") %>%
+  as.matrix()
+
+# execute impSeqRob
+q_example_partial_missing_wide_imp <- impSeqRob(mat_example_partial_missing_wide)
+
+mat_example_partial_missing_wide_imp <- q_example_partial_missing_wide_imp$x
+
+# Step 5: Get final data frame of imputed values
+
+df_example_partial_missing_imp <- mat_example_partial_missing_wide_imp %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "nterm_modif_peptide") %>%
+  pivot_longer(
+    cols = -nterm_modif_peptide,
+    names_to = "sample",
+    values_to = "Abundance"
+  ) %>%
+  left_join(.,quant_peptide_data_long2 %>% 
+              dplyr::select(-Abundance, -abundance_imputed))
+```
+
+## Generate tabular summary of missingness and imputation approach per feature
+
+```{r}
+# get summary table of missingness and imputation approach by feature observation
+imputation_summary_table <- df_example_partial_missing_imp %>%
+  dplyr::select(
+    nterm_modif_peptide, 
+    sample, 
+    sample_name, 
+    Num_Quantified_per_cond,
+    Num_Missing_per_cond,
+    Proportion_Missing,
+    Total_Replicates,
+    Missingness_Category, 
+    imputation_method
+  ) %>% 
+  distinct() 
+```
+
+## Generate imputed quant matrix for further analysis
+
+```{r}
+quant_peptide_data_imputed <- df_example_partial_missing_imp %>% 
+dplyr::select(nterm_modif_peptide, sample, Abundance) %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = Abundance
+  )
+```
+
+```{r}
+### Generate matrix object for imputed data
+mat_quant_pept_imp <- quant_peptide_data_imputed %>%
+  column_to_rownames("nterm_modif_peptide") %>%
+  as.matrix()
+```
+
+# Principal component analysis
+
+```{r}
+t_mat_quant_pept_imp <- t(mat_quant_pept_imp)
+
+# perform PCA with mixomics
+pca_res <- mixOmics::pca(t_mat_quant_pept_imp, ncomp = 2)
+```
+
+```{r}
+pca_comps_df <- pca_res$x[,1:2] %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "sample") %>%
+  left_join(., sample_annotation)
+
+var_exp_pc1 <- pca_res$prop_expl_var$X[1]
+var_exp_pc2 <- pca_res$prop_expl_var$X[2]
+```
+
+```{r}
+# visualize components with ggplot2
+pca_comps_df %>%
+  ggplot(aes(x = PC1,
+             y = PC2,
+             color = condition)) +
+  geom_point(size = 3.5) +
+  # add elipsis around points for each condition
+ stat_ellipse(level = 0.50) +
+  labs(
+    x = paste("PC1 - Variance explained:", round(var_exp_pc1, 2) * 100, "%"),
+    y = paste("PC2 - Variance explained:", round(var_exp_pc2, 2) * 100, "%")
+  ) +
+  # add text with name of the samples
+  geom_text_repel(aes(label = sample),
+                  size = 2.9) +
+  labs(color = "Condition") + 
+  theme_minimal() + 
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+# Distribution of abundances after imputation
+
+## Histogram
+
+```{r fig.width=8, fig.height=3.5}
+df_example_partial_missing_imp %>%
+  ggplot(aes(x = Abundance, 
+             fill = imputation_method)) +
+  geom_histogram(binwidth = 0.2, 
+                 alpha = 0.5) +
+  labs(
+    title = "Distribution of abundances by imputation approach",
+    x = "Mean abundance",
+    fill = "Imputation"
+  ) +
+  facet_grid(~condition) +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "grey"),
+    panel.border = element_rect(fill=NA, linewidth=1.5),
+    axis.title=element_text(size = 12, face = "bold")
+  )
+```
+
+## Density plot
+
+```{r fig.width=8, fig.height=3.5}
+df_example_partial_missing_imp %>%
+  ggplot(aes(x = Abundance, 
+             fill = imputation_method)) +
+  geom_density(aes(y = ..count..), alpha = 0.3) +
+  labs(
+    title = "Distribution of abundances by imputation approach",
+    x = "Mean abundance",
+    fill = "Imputation"
+  ) +
+  facet_grid(~condition) +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "grey"),
+    panel.border = element_rect(fill=NA, linewidth=1.5),
+    axis.title=element_text(size = 12, face = "bold")
+  )
+```
+
+# Number of quantitative observations by type of imputation 
+
+```{r fig.width=6, fig.height=6}
+# barplot for counts by contrast and method
+
+imputation_summary_table %>%
+  ggplot(aes(x = imputation_method, fill = imputation_method)) +
+  geom_bar(
+    #position = "dodge"
+    fill = "#47A8BD"
+    ) +
+  # add geom_text on top of the bars with the numbers
+  geom_text(aes(label = ..count..), stat = "count", vjust = 0.5, size = 3) +
+  labs(title = "Nr of quantitative observations by type of imputation",
+       subtitle = "After exclusion of sparse features",
+       x = "Imputation type",
+       y = "Nr of quantitative observations") +
+  #facet_grid(imputation ~ linear_model) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+# Comments 
+
+# Session info
+
+```{r echo=TRUE}
+sessionInfo()
+```
+
+
+
+
+
+
+
