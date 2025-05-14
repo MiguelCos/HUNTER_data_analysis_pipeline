@@ -126,15 +126,6 @@ diann_report_location <- here("fp_searches/fp_hunter_dia/diann-output/report.tsv
 location_annotation <- here("fp_searches/fp_hunter_dia/experiment_annotation_corrected.tsv")
 ```
 
-## Location of TargetP prediction annotation file 
-
-```{r}
-# set to NULL if not available
-# targetp_annotation <- NULL
-
-targetp_location <- here("annotations/yeast_uniprot_summary.targetp2")
-```
-
 ## Location of fasta file
 
 ```{r}
@@ -179,6 +170,15 @@ instrument <- if (instrument == "EX") {
 } else {
   stop("Instrument definition not recognized")
 }
+```
+
+## Location of TargetP prediction annotation file 
+
+```{r}
+# set to NULL if not available
+# targetp_annotation <- NULL
+
+targetp_location <- here("annotations/yeast_uniprot_summary.targetp2")
 ```
 
 ## Define contrasts 
