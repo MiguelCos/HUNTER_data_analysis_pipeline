@@ -1,4 +1,5 @@
 # HUNTER data analysis workflow with RStudio and Quarto reporting
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15410796.svg)](https://doi.org/10.5281/zenodo.15410796)
 
 This repo will hold scripts and reproducilbe reports for the initial steps of data processing and analysis of HUNTER experiments. The general workflow is based on the TermineR approach with specific modifications for terminally enriched samples. 
 
