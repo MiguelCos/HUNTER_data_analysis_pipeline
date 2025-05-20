@@ -1,5 +1,5 @@
 ---
-title: "Labelling efficiency - pre-HUNTER | NV012 MIP N-terminome human"
+title: "Labelling efficiency - pre-HUNTER | "
 author: "Miguel Cosenza-Contreras"
 format:
   html:
