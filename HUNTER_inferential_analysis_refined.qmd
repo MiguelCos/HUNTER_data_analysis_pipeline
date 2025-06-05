@@ -853,6 +853,8 @@ mat_quant_pept_imp <- quant_peptide_data_imputed %>%
 ### Peptide annotation information 
 
 ```{r}
+# we also keep the annotation information only of the non-sparse features
+# sparse features are those that are 'completely missing' in all conditions. 
 annotated_df_quant_no_sparse <- annotated_df_quant %>%
   filter(nterm_modif_peptide %in% df_example_partial_missing_imp$nterm_modif_peptide)
 ```
