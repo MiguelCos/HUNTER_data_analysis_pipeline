@@ -470,12 +470,6 @@ if (!is.null(exclude_preceding)) {
 }
 ```
 
-```{r}
-# get peptide annotation
-nterannot <- annotated_df_quant %>%
-  dplyr::select(nterm_modif_peptide:protein_sequence)
-```
-
 # Visualize number of peptide with N-term modification by Processing Type
 
 ## Before application of exclusion criteria 
