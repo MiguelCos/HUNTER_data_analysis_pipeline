@@ -209,9 +209,6 @@ colnames(df_raw_diann) <- str_remove(
 df_raw_diann <- df_raw_diann %>%
     as.data.frame() %>%
     rownames_to_column("precursor_id")
-
-df_raw_diann <- df_raw_diann[, -8]
-
 ```
 
 ## Load sample annotation data
