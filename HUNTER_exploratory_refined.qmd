@@ -530,7 +530,7 @@ missing_value_info %>%
     alpha = 0.5,
     size = 0.8
   ) +
-  facet_wrap(~ uniprot_processing_type) +
+  facet_wrap(~ processing_type) +
   labs(
     color = "Specificity"
   ) + 

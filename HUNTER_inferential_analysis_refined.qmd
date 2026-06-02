@@ -172,15 +172,6 @@ instrument <- if (instrument == "EX") {
 }
 ```
 
-## Location of TargetP prediction annotation file 
-
-```{r}
-# set to NULL if not available
-# targetp_annotation <- NULL
-
-targetp_location <- here("annotations/yeast_uniprot_summary.targetp2")
-```
-
 ## Define contrasts 
 
 ```{r echo=TRUE}
@@ -298,53 +289,6 @@ prot2gene <- report_tsv %>%
 
 ```
 
-## TargetP predictions
-
-```{r}
-# if targetp_location is not NULL, run the following code
-
-if (is.null(targetp_location)) {
-  
-  message("TargetP annotation not defined")
-  
-} else {
-  message("TargetP annotation defined. Loading")
-  
-  targetp_annotation <- read_tsv(targetp_location,
-                               skip = 1) %>%
-  clean_names() %>%
-  separate(
-    number_id,
-    into = c("trembl", "protein", "uniprot_accession"),
-    sep = "\\|",
-    remove = FALSE
-  ) %>%
-  dplyr::rename(
-    protein_header = number_id
-  ) %>%
-  mutate(
-    targetp_p1_position = str_remove(cs_position,
-                                     "CS pos:")
-  ) %>%
-  mutate(
-    targetp_p1_position = str_remove(targetp_p1_position,
-                                     # everything after the first "-"
-                                     "-.*")
-  ) %>%
-  mutate(
-    targetp_p1_position = as.numeric(targetp_p1_position)
-  ) %>%
-  filter(
-    !is.na(targetp_p1_position)
-  ) %>% 
-  dplyr::select(
-    protein,
-    targetp_category = prediction,
-    targetp_p1_position
-  ) 
-}
-```
-
 # Annotation of peptide specificities
 
 ```{r}
@@ -358,96 +302,6 @@ annotated_df_quant <- annotate_neo_termini(
   relocate(cleav_len,
            .after = processing_annotation_end) %>%
   filter(!is.na(peptide_start))
-
-if(!is_empty(targetp_annotation)){
-  
-  annotated_df_quant <- annotated_df_quant %>%
-  left_join(., targetp_annotation) %>%
-  relocate(
-    cleav_len,
-    .after = cleavage_sequence
-  ) %>%
-  mutate(
-    targetp_matches_p1_prime = case_when(
-      abs(as.numeric(p1_position) - targetp_p1_position) < 4 ~ TRUE,
-        TRUE ~ FALSE
-    )
-  ) %>%
-  mutate(
-    processing_type_targetp = case_when(
-      targetp_matches_p1_prime == TRUE & targetp_category == "SP" ~ "SIGNAL",
-      targetp_matches_p1_prime == TRUE & targetp_category == "mTP" ~ "mTP",
-      targetp_matches_p1_prime == TRUE & targetp_category == "cTP" ~ "cTP",
-      targetp_matches_p1_prime == TRUE & targetp_category == "luTP" ~ "luTP",
-      targetp_matches_p1_prime == FALSE ~ "not_canonical",
-      is.na(targetp_matches_p1_prime) ~ "not_canonical",
-      TRUE ~ "not_canonical"
-    )) %>%
-  mutate(
-    processing_type_terminer = case_when(
-      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical") ~ processing_type_targetp,
-      (uniprot_processing_type == processing_type_targetp) & (processing_type_targetp == "not_canonical") ~ uniprot_processing_type,
-      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical_no_procc_annot") ~ uniprot_processing_type,
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical") ~ processing_type_targetp,
-      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp == "not_canonical") ~ uniprot_processing_type,
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical_no_procc_annot") ~ processing_type_targetp,
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical") ~ processing_type_targetp,
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical_no_procc_annot") ~ processing_type_targetp,
-      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp != "not_canonical") ~ processing_type_targetp,
-      TRUE ~ "not_canonical"
-    )
-  ) %>%
-  mutate(
-    source_processing_annotation = case_when(
-      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical") ~ "Other",
-      (uniprot_processing_type == processing_type_targetp) & (processing_type_targetp == "not_canonical") ~ "Other",
-      (uniprot_processing_type == processing_type_targetp) & (uniprot_processing_type == "not_canonical_no_procc_annot") ~ "Other",
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical") ~ "TargetP",
-      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp == "not_canonical") ~ "Uniprot",
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type == "not_canonical_no_procc_annot") ~ "Other",
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical") ~ "Conflict/both",
-      (uniprot_processing_type != processing_type_targetp) &  (uniprot_processing_type != "not_canonical_no_procc_annot") ~ "Conflict/both",
-      (uniprot_processing_type != processing_type_targetp) &  (processing_type_targetp != "not_canonical") ~ "Conflict/both",
-      TRUE ~ "not_canonical"
-    )
-  ) %>%
-  mutate(
-    source_processing_annotation = case_when(
-      str_detect(processing_type_terminer, "not_canonical") ~ "Other", 
-      TRUE ~ source_processing_annotation
-    )) %>%
-  mutate(
-    processing_type = case_when(
-      str_detect(processing_type_terminer, "INIT_MET") ~ "P2",
-      processing_type_terminer == "Intact_ORF" ~ "P1",
-      processing_type_terminer == "mTP" ~ "MTS", 
-      processing_type_terminer == "SIGNAL" ~ "SP",
-      processing_type_terminer == "not_canonical_no_procc_annot" ~ "not_canonical",
-      TRUE ~ processing_type_terminer
-    )
-  ) %>%
-  mutate(
-    difference = case_when(
-      targetp_matches_p1_prime == TRUE ~ p1_position - targetp_p1_position,
-      matches_p1_prime == TRUE & targetp_matches_p1_prime == FALSE ~ p1_position - processing_annotation_end,
-    )
-  ) %>%
-  mutate(
-    processing_type = factor(
-      processing_type,
-      levels = c("P1", "P2", "SP", "MTS", "cTP", "TRANSIT", "PROPEP", "not_canonical")
-    )
-  ) %>%
-  relocate(targetp_category,
-           targetp_p1_position,
-           targetp_matches_p1_prime,
-           processing_type_targetp,
-           processing_type_terminer,
-           processing_type,
-           source_processing_annotation,
-           .after = processing_annotation_end) 
-  
-}
 ```
 
 ## Filtering features
@@ -580,6 +434,7 @@ count_termini_annot_source %>%
             size = 3.5, 
             position = "stack") +
   scale_fill_manual(values = c("Other" = "#CAD2C5", 
+                               "Both" = "#22577A",
                                "Uniprot" = "#59C3C3",
                                "TargetP" = "#84A98C", 
                                "Conflict/both" = "darkgrey")) +
